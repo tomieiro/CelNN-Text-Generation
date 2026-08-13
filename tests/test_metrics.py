@@ -1,7 +1,12 @@
 import math
 
 from celllm.config import ModelConfig
-from celllm.metrics import analytic_flops, bits_per_character, count_parameters
+from celllm.metrics import (
+    analytic_flops,
+    bits_per_character,
+    count_parameters,
+    gated_conv_flops,
+)
 from celllm.model import CelNNLanguageModel
 
 
@@ -32,3 +37,9 @@ def test_spatial_flops_scale_as_n_d_k_offsets():
 def test_rank_q_channel_flops_are_2ndqk():
     cfg = ModelConfig(n=64, d=128, r=2, k=32, mixer="rank8")
     assert analytic_flops(cfg)["channel"] == 2 * 64 * 128 * 8 * 32
+
+
+def test_gated_control_counts_every_convolutional_layer():
+    cfg = ModelConfig(n=64, d=128, r=2, k=32)
+    expected = 4 * 64 * 3 * 128 * 256 + 64 * 128 * 27
+    assert gated_conv_flops(cfg) == expected

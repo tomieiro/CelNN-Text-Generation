@@ -15,7 +15,7 @@ from celllm.bench import measure_latency
 from celllm.config import ModelConfig, TrainConfig
 from celllm.controls import GatedConvLM
 from celllm.data import Batcher, load_text8, split_text8
-from celllm.metrics import analytic_flops, count_parameters
+from celllm.metrics import analytic_flops, count_parameters, gated_conv_flops
 from celllm.model import CelNNLanguageModel
 from celllm.train import set_seed, train
 
@@ -74,13 +74,18 @@ def run_rung(
     counts = count_parameters(model)
     config = _rung_config(name, base)
     tokens = torch.randint(0, base.vocab_size, (train_config.batch_size, base.n))
+    flops = (
+        gated_conv_flops(config)
+        if RUNGS[name]["control"]
+        else analytic_flops(config)["total"]
+    )
     return {
         "rung": name,
         "bpc_mean": statistics.mean(scores),
         "bpc_std": statistics.pstdev(scores) if len(scores) > 1 else 0.0,
         "core": counts["core"],
         "total": counts["total"],
-        "flops": analytic_flops(config)["total"],
+        "flops": flops,
         "latency_ms": measure_latency(model, tokens) * 1000.0,
     }
 

@@ -44,3 +44,10 @@ def analytic_flops(cfg: ModelConfig) -> dict[str, int]:
         "readout": readout,
         "total": spatial + channel + readout,
     }
+
+
+def gated_conv_flops(cfg: ModelConfig, layers: int = 4, kernel: int = 3) -> int:
+    """Count multiply-accumulates for the rung-H gated convolutional control."""
+    convolution = layers * cfg.n * kernel * cfg.d * (2 * cfg.d)
+    readout = cfg.n * cfg.d * cfg.vocab_size
+    return convolution + readout
