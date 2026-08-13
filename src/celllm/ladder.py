@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+from dataclasses import asdict
 from dataclasses import replace
 from pathlib import Path
 
@@ -55,19 +56,41 @@ def run_rung(
     valid_ids,
     seeds: tuple[int, ...] = (42, 1337, 2024),
     device: str = "cpu",
+    checkpoint_dir: str | Path | None = "checkpoints",
 ) -> dict[str, float | int | str]:
     """Train one rung across seeds and collect quality and cost measurements."""
     scores: list[float] = []
     model: nn.Module | None = None
     for seed in seeds:
-        set_seed(seed)
-        model = build_rung(name, base).to(device)
-        result = train(
-            model,
-            Batcher(train_ids, base.n, train_config.batch_size, seed),
-            Batcher(valid_ids, base.n, train_config.batch_size, seed + 1),
-            replace(train_config, seed=seed),
+        checkpoint_path = (
+            Path(checkpoint_dir) / f"rung-{name}-seed-{seed}.pt"
+            if checkpoint_dir is not None
+            else None
         )
+        if checkpoint_path is not None and checkpoint_path.exists():
+            model, checkpoint = load_checkpoint(checkpoint_path, device=device)
+            result = checkpoint["result"]
+            print(f"resumed {checkpoint_path}", flush=True)
+        else:
+            set_seed(seed)
+            model = build_rung(name, base).to(device)
+            result = train(
+                model,
+                Batcher(train_ids, base.n, train_config.batch_size, seed),
+                Batcher(valid_ids, base.n, train_config.batch_size, seed + 1),
+                replace(train_config, seed=seed),
+            )
+            if checkpoint_path is not None:
+                save_checkpoint(
+                    checkpoint_path,
+                    name,
+                    base,
+                    train_config,
+                    seed,
+                    model,
+                    result,
+                )
+                print(f"saved {checkpoint_path}", flush=True)
         scores.append(float(result["final_bpc"]))
 
     assert model is not None
@@ -88,6 +111,46 @@ def run_rung(
         "flops": flops,
         "latency_ms": measure_latency(model, tokens) * 1000.0,
     }
+
+
+def save_checkpoint(
+    path: str | Path,
+    rung: str,
+    base: ModelConfig,
+    train_config: TrainConfig,
+    seed: int,
+    model: nn.Module,
+    result: dict[str, object],
+) -> None:
+    """Persist trained weights and enough metadata to reconstruct the model."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    torch.save(
+        {
+            "format_version": 1,
+            "rung": rung,
+            "seed": seed,
+            "model_config": asdict(base),
+            "train_config": asdict(train_config),
+            "model_state": model.state_dict(),
+            "result": result,
+        },
+        temporary,
+    )
+    temporary.replace(destination)
+
+
+def load_checkpoint(
+    path: str | Path,
+    device: str = "cpu",
+) -> tuple[nn.Module, dict[str, object]]:
+    """Reconstruct a trained rung for evaluation or later inference."""
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
+    model = build_rung(str(checkpoint["rung"]), ModelConfig(**checkpoint["model_config"]))
+    model.load_state_dict(checkpoint["model_state"])
+    model.to(device).eval()
+    return model, checkpoint
 
 
 def format_table(results: list[dict]) -> str:
@@ -116,6 +179,7 @@ def main() -> None:
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
     parser.add_argument("--rungs", default="ABCDEFGH")
+    parser.add_argument("--checkpoint-dir", default="checkpoints")
     args = parser.parse_args()
 
     train_ids, valid_ids, _ = split_text8(load_text8(args.data))
@@ -125,7 +189,13 @@ def main() -> None:
     for name in args.rungs:
         print(f"=== rung {name} ===", flush=True)
         row = run_rung(
-            name, base, train_config, train_ids, valid_ids, device=args.device
+            name,
+            base,
+            train_config,
+            train_ids,
+            valid_ids,
+            device=args.device,
+            checkpoint_dir=args.checkpoint_dir,
         )
         results.append(row)
         print(json.dumps(row), flush=True)

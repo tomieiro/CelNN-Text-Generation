@@ -1,6 +1,15 @@
 from celllm.config import ModelConfig
 from celllm.controls import GatedConvLM
-from celllm.ladder import RUNGS, build_rung, format_table
+import torch
+
+from celllm.config import TrainConfig
+from celllm.ladder import (
+    RUNGS,
+    build_rung,
+    format_table,
+    load_checkpoint,
+    save_checkpoint,
+)
 from celllm.metrics import count_parameters
 from celllm.model import CelNNLanguageModel
 
@@ -45,3 +54,26 @@ def test_format_table_contains_rung_bpc_and_core_size():
     ]
     table = format_table(results)
     assert "B" in table and "3.21" in table and "896" in table
+
+
+def test_checkpoint_reconstructs_trained_rung(tmp_path):
+    config = ModelConfig(n=64, d=16, r=2, k=32, vocab_size=27, mixer="rank4")
+    model = build_rung("C", config).eval()
+    tokens = torch.randint(0, 27, (2, 64))
+    expected = model(tokens)
+    path = tmp_path / "rung-C-seed-42.pt"
+
+    save_checkpoint(
+        path,
+        "C",
+        config,
+        TrainConfig(steps=1),
+        42,
+        model,
+        {"final_bpc": 4.0, "best_bpc": 4.0, "history": [(1, 4.0)]},
+    )
+    restored, metadata = load_checkpoint(path)
+
+    torch.testing.assert_close(restored(tokens), expected)
+    assert metadata["rung"] == "C"
+    assert metadata["seed"] == 42
