@@ -53,3 +53,33 @@ def test_set_seed_makes_training_reproducible():
         )
 
     assert run()["final_bpc"] == run()["final_bpc"]
+
+
+def test_progress_checkpoint_is_rotating_and_resumable(tmp_path):
+    set_seed(5)
+    cfg = ModelConfig(n=64, d=8, vocab_size=27, mixer="none")
+    model = CelNNLanguageModel(cfg)
+    train_config = TrainConfig(
+        steps=3, warmup=1, eval_every=3, eval_batches=1
+    )
+    progress = tmp_path / "seed.progress.pt"
+    first = train(
+        model,
+        _repeating_batcher(),
+        _repeating_batcher(1),
+        train_config,
+        progress_path=progress,
+        checkpoint_every=1,
+    )
+    assert progress.exists()
+
+    restored = CelNNLanguageModel(cfg)
+    second = train(
+        restored,
+        _repeating_batcher(),
+        _repeating_batcher(1),
+        train_config,
+        progress_path=progress,
+        checkpoint_every=1,
+    )
+    assert second == first

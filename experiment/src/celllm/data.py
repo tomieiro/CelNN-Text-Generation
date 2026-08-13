@@ -71,3 +71,11 @@ class Batcher:
             [self._ids[start : start + self._n] for start in starts]
         )
         return torch.from_numpy(windows)
+
+    def state_dict(self) -> dict:
+        """Return the NumPy generator state for exact batch resumption."""
+        return self._rng.bit_generator.state
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore the NumPy generator state from a progress checkpoint."""
+        self._rng.bit_generator.state = state

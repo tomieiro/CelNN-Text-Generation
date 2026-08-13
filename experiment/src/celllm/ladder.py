@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
 import statistics
 from dataclasses import asdict
 from dataclasses import replace
@@ -67,6 +68,13 @@ def run_rung(
             if checkpoint_dir is not None
             else None
         )
+        progress_path = (
+            checkpoint_path.with_name(
+                checkpoint_path.name.removesuffix(".pt") + ".progress.pt"
+            )
+            if checkpoint_path is not None
+            else None
+        )
         if checkpoint_path is not None and checkpoint_path.exists():
             model, checkpoint = load_checkpoint(checkpoint_path, device=device)
             result = checkpoint["result"]
@@ -79,6 +87,7 @@ def run_rung(
                 Batcher(train_ids, base.n, train_config.batch_size, seed),
                 Batcher(valid_ids, base.n, train_config.batch_size, seed + 1),
                 replace(train_config, seed=seed),
+                progress_path=progress_path,
             )
             if checkpoint_path is not None:
                 save_checkpoint(
@@ -91,6 +100,8 @@ def run_rung(
                     result,
                 )
                 print(f"saved {checkpoint_path}", flush=True)
+                if progress_path is not None and progress_path.exists():
+                    progress_path.unlink()
         scores.append(float(result["final_bpc"]))
 
     assert model is not None
@@ -182,6 +193,18 @@ def main() -> None:
     parser.add_argument("--checkpoint-dir", default="checkpoints")
     args = parser.parse_args()
 
+    hardware = {
+        "host": platform.node(),
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "device": (
+            torch.cuda.get_device_name(0)
+            if args.device.startswith("cuda") and torch.cuda.is_available()
+            else args.device
+        ),
+    }
+    print(json.dumps({"hardware": hardware}), flush=True)
+
     train_ids, valid_ids, _ = split_text8(load_text8(args.data))
     base = ModelConfig(n=64, d=128, r=2, k=32, vocab_size=27)
     train_config = TrainConfig(steps=args.steps)
@@ -200,7 +223,10 @@ def main() -> None:
         results.append(row)
         print(json.dumps(row), flush=True)
 
-    Path(args.out).write_text(json.dumps(results, indent=2), encoding="utf-8")
+    Path(args.out).write_text(
+        json.dumps({"hardware": hardware, "results": results}, indent=2),
+        encoding="utf-8",
+    )
     print("\n" + format_table(results))
 
 

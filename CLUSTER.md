@@ -1,11 +1,11 @@
-# Running Experiment 0 on the A100 cluster
+# Running Experiment 0 on the GPU cluster
 
 Submit the notebook together with the project files. An eight-hour allocation
 is a conservative first request for the full eight-rung, three-seed ladder:
 
 ```bash
 ovpn-job-submitter \
-  experiment/experiment-0-a100.ipynb \
+  experiment/experiment-0-gpu.ipynb \
   /path/to/vpn-directory \
   --include-files \
   --partition devwork \
@@ -33,11 +33,11 @@ outputs/
 └── notebook.executed.ipynb
 ```
 
-Each completed seed is checkpointed. If the allocation times out, copy the
+Each completed seed is checkpointed. During an active seed, a single rotating
+`.progress.pt` file is overwritten every 1,000 steps; it includes optimizer
+and batch-stream state for exact continuation without accumulating snapshots.
+When the seed finishes, the progress file is removed and only the compact
+final weights remain. If the allocation times out, copy the
 downloaded `.pt` files into the local `checkpoints/` directory and submit the
 same notebook again. It stages those files back into the output mount and
 skips completed seeds automatically.
-
-The current checkpoint boundary is the end of a seed. A timeout during a seed
-repeats that seed on the next submission; previously completed seeds remain
-safe.
