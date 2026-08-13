@@ -27,5 +27,8 @@ at least one C2-compliant rung finishes within 0.25 BPC of rung H under the
 matched 20,000-step, three-seed protocol. The knee is the cheapest passing rung
 whose next rung improves mean BPC by less than 0.05.
 
-The gate verdict and settling interpretation remain **pending** until the full
-ladder is run. The smoke results do not satisfy the training budget.
+The full ladder has now been completed. The best CelNN rung (G, 2.2802 BPC)
+finished 0.4490 BPC behind the convolutional control (H, 1.8312 BPC), so the
+pre-registered 0.25-BPC capacity gate did not pass. The complete protocol,
+results, caveats, and next-step decision are recorded in
+[`findings/etapa-1.md`](../findings/etapa-1.md).
