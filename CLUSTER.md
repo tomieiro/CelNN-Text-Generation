@@ -5,7 +5,7 @@ is a conservative first request for the full eight-rung, three-seed ladder:
 
 ```bash
 ovpn-job-submitter \
-  experiment-0-a100.ipynb \
+  experiment/experiment-0-a100.ipynb \
   /path/to/vpn-directory \
   --include-files \
   --partition devwork \
@@ -17,6 +17,11 @@ ovpn-job-submitter \
 
 `vpn-directory` must contain exactly one `.ovpn` file and its referenced
 certificates. Time limits accept `HH:MM:SS` or `D-HH:MM:SS`.
+
+The `experiment/` directory is a self-contained submission bundle containing
+the notebook, the CellLM package, and compressed Text8. The notebook installs
+the canonical differentiable CelNN implementation from
+`https://github.com/tomieiro/libPyCelNN` before installing the bundled CellLM.
 
 The notebook writes all durable artifacts below `/workspace/outputs`, which
 the submitter downloads into `.dgx-results/<job-id>/`:

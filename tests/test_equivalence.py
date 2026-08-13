@@ -41,15 +41,15 @@ def test_torch_cell_matches_celnn_reference_at_d1():
     )
     cell = CelNNCell(cfg, causal=False).double()
     with torch.no_grad():
-        cell.a.weights.copy_(torch.from_numpy(feedback).unsqueeze(1))
-        cell.b.weights.copy_(torch.from_numpy(control).unsqueeze(1))
-        cell.z.fill_(bias)
+        cell.dynamics.feedback.copy_(torch.from_numpy(feedback).unsqueeze(1))
+        cell.dynamics.control.copy_(torch.from_numpy(control).unsqueeze(1))
+        cell.dynamics.bias.fill_(bias)
 
     embedding = torch.from_numpy(cell_input).reshape(1, n, 1)
-    drive = cell.control_drive(embedding)
+    cell_input = cell.control_input(embedding)
     state = torch.zeros(1, n, 1, dtype=torch.float64)
     for _ in range(steps):
-        state = cell.step(state, drive)
+        state = cell.step(state, cell_input)
 
     np.testing.assert_allclose(
         state.squeeze().detach().numpy(), reference, rtol=1e-9, atol=1e-9
