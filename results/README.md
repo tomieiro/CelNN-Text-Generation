@@ -29,6 +29,4 @@ whose next rung improves mean BPC by less than 0.05.
 
 The full ladder has now been completed. The best CelNN rung (G, 2.2802 BPC)
 finished 0.4490 BPC behind the convolutional control (H, 1.8312 BPC), so the
-pre-registered 0.25-BPC capacity gate did not pass. The complete protocol,
-results, caveats, and next-step decision are recorded in
-[`findings/etapa-1.md`](../findings/etapa-1.md).
+pre-registered 0.25-BPC capacity gate did not pass.
