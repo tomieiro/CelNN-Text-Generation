@@ -24,7 +24,8 @@ class CelNNCell(nn.Module):
         self.eta = cfg.eta
         self.a = build_template(cfg.spatial, cfg.r, cfg.d, causal)
         self.b = build_template(cfg.spatial, cfg.r, cfg.d, causal)
-        self.z = nn.Parameter(torch.zeros(cfg.d))
+        bias_channels = 1 if cfg.spatial == "scalar" else cfg.d
+        self.z = nn.Parameter(torch.zeros(bias_channels))
         self.mixer = build_mixer(cfg.mixer, cfg.d)
 
     def control_drive(self, embedding: torch.Tensor) -> torch.Tensor:
