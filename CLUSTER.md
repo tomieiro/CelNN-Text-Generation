@@ -22,6 +22,9 @@ The `experiment/` directory is a self-contained submission bundle containing
 the notebook, the CellLM package, and compressed Text8. The notebook installs
 the canonical differentiable CelNN implementation from
 `https://github.com/tomieiro/libPyCelNN` before installing the bundled CellLM.
+The GPU notebook runs the three independent seeds of each rung concurrently,
+which preserves the per-seed protocol while using more of an A100's otherwise
+idle memory and compute capacity.
 
 The notebook writes all durable artifacts below `/workspace/outputs`, which
 the submitter downloads into `.dgx-results/<job-id>/`:

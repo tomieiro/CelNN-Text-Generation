@@ -6,6 +6,7 @@ import argparse
 import json
 import platform
 import statistics
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from dataclasses import replace
 from pathlib import Path
@@ -58,10 +59,12 @@ def run_rung(
     seeds: tuple[int, ...] = (42, 1337, 2024),
     device: str = "cpu",
     checkpoint_dir: str | Path | None = "checkpoints",
+    parallel_seeds: int = 1,
 ) -> dict[str, float | int | str]:
     """Train one rung across seeds and collect quality and cost measurements."""
     scores: list[float] = []
-    model: nn.Module | None = None
+    models: list[nn.Module] = []
+    pending = []
     for seed in seeds:
         checkpoint_path = (
             Path(checkpoint_dir) / f"rung-{name}-seed-{seed}.pt"
@@ -79,32 +82,72 @@ def run_rung(
             model, checkpoint = load_checkpoint(checkpoint_path, device=device)
             result = checkpoint["result"]
             print(f"resumed {checkpoint_path}", flush=True)
+            scores.append(float(result["final_bpc"]))
+            models.append(model)
         else:
             set_seed(seed)
             model = build_rung(name, base).to(device)
-            result = train(
-                model,
-                Batcher(train_ids, base.n, train_config.batch_size, seed),
-                Batcher(valid_ids, base.n, train_config.batch_size, seed + 1),
-                replace(train_config, seed=seed),
-                progress_path=progress_path,
-            )
-            if checkpoint_path is not None:
-                save_checkpoint(
-                    checkpoint_path,
-                    name,
-                    base,
-                    train_config,
+            pending.append(
+                (
                     seed,
                     model,
-                    result,
+                    Batcher(train_ids, base.n, train_config.batch_size, seed),
+                    Batcher(valid_ids, base.n, train_config.batch_size, seed + 1),
+                    checkpoint_path,
+                    progress_path,
                 )
-                print(f"saved {checkpoint_path}", flush=True)
-                if progress_path is not None and progress_path.exists():
-                    progress_path.unlink()
-        scores.append(float(result["final_bpc"]))
+            )
 
-    assert model is not None
+    def train_seed(item):
+        seed, model, train_batcher, valid_batcher, _, progress_path = item
+        seed_config = replace(train_config, seed=seed)
+        if str(device).startswith("cuda"):
+            stream = torch.cuda.Stream(device=device)
+            with torch.cuda.stream(stream):
+                result = train(
+                    model,
+                    train_batcher,
+                    valid_batcher,
+                    seed_config,
+                    progress_path=progress_path,
+                )
+            stream.synchronize()
+        else:
+            result = train(
+                model,
+                train_batcher,
+                valid_batcher,
+                seed_config,
+                progress_path=progress_path,
+            )
+        return item, result
+
+    trained = []
+    if pending:
+        workers = min(max(1, parallel_seeds), len(pending))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            trained = list(executor.map(train_seed, pending))
+
+    for item, result in trained:
+        seed, model, _, _, checkpoint_path, progress_path = item
+        if checkpoint_path is not None:
+            save_checkpoint(
+                checkpoint_path,
+                name,
+                base,
+                train_config,
+                seed,
+                model,
+                result,
+            )
+            print(f"saved {checkpoint_path}", flush=True)
+            if progress_path is not None and progress_path.exists():
+                progress_path.unlink()
+        scores.append(float(result["final_bpc"]))
+        models.append(model)
+
+    assert models
+    model = models[-1]
     counts = count_parameters(model)
     config = _rung_config(name, base)
     tokens = torch.randint(0, base.vocab_size, (train_config.batch_size, base.n))
@@ -191,6 +234,7 @@ def main() -> None:
     )
     parser.add_argument("--rungs", default="ABCDEFGH")
     parser.add_argument("--checkpoint-dir", default="checkpoints")
+    parser.add_argument("--parallel-seeds", type=int, default=1)
     args = parser.parse_args()
 
     hardware = {
@@ -219,6 +263,7 @@ def main() -> None:
             valid_ids,
             device=args.device,
             checkpoint_dir=args.checkpoint_dir,
+            parallel_seeds=args.parallel_seeds,
         )
         results.append(row)
         print(json.dumps(row), flush=True)
