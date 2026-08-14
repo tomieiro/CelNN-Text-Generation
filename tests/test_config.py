@@ -1,6 +1,6 @@
 import pytest
 
-from celllm.config import ModelConfig
+from celllm.config import ModelConfig, PlasticityConfig
 
 
 def test_default_config_satisfies_receptive_field():
@@ -22,3 +22,11 @@ def test_offsets_are_causal():
 def test_drive_is_bounded_by_default():
     """Chua-Yang eq. 2.1e constrains |v_u| <= 1; embeddings are unbounded."""
     assert ModelConfig().bound_drive is True
+
+
+def test_plasticity_rule_and_chunk_size_are_validated():
+    assert PlasticityConfig().rule == "oja"
+    with pytest.raises(ValueError, match="rule"):
+        PlasticityConfig(rule="unknown")
+    with pytest.raises(ValueError, match="chunk_size"):
+        PlasticityConfig(chunk_size=0)

@@ -5,6 +5,10 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from celnn import HebbianRule, OjaRule, Plasticity, PlasticityState
+
+from celllm.config import PlasticityConfig
+
 _RANKS = {"rank4": 4, "rank8": 8, "rank16": 16, "rank32": 32}
 
 
@@ -40,6 +44,43 @@ class DenseMixer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.proj(x)
+
+
+class PlasticDenseMixer(nn.Module):
+    """Dense slow mixing plus caller-owned Hebbian fast weights."""
+
+    def __init__(self, d: int, config: PlasticityConfig) -> None:
+        super().__init__()
+        self.proj = nn.Linear(d, d, bias=False)
+        rule = (
+            HebbianRule(config.learning_rate, config.decay)
+            if config.rule == "hebbian"
+            else OjaRule(config.learning_rate, config.decay)
+        )
+        self.plasticity = Plasticity(
+            rule,
+            alpha=config.alpha,
+            learnable_alpha=config.learnable_alpha,
+            detach_updates=config.detach_updates,
+            memory_limit=config.memory_limit,
+        )
+
+    def new_state(self, batch_size: int) -> PlasticityState:
+        """Return empty per-sequence memory on the mixer's device."""
+        return self.plasticity.new_state(batch_size, self.proj.weight)
+
+    def forward(
+        self, x: torch.Tensor, state: PlasticityState
+    ) -> torch.Tensor:
+        """Mix channels using fixed memory for the current causal block."""
+        weight = self.plasticity.effective_weight(self.proj.weight, state)
+        return torch.einsum("b...i,boi->b...o", x, weight)
+
+    def observe(
+        self, state: PlasticityState, activity: torch.Tensor
+    ) -> PlasticityState:
+        """Publish an auto-associative update for the next causal block."""
+        return self.plasticity.update(state, activity, activity)
 
 
 def build_mixer(name: str, d: int) -> nn.Module:

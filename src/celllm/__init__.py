@@ -2,9 +2,13 @@
 
 from typing import Any
 
-from celllm.config import ModelConfig, TrainConfig
+from celllm.config import ModelConfig, PlasticityConfig, TrainConfig
 from celllm.controls import GatedConvLM
-from celllm.model import CelNNLanguageModel
+from celllm.model import CelNNLanguageModel, PlasticCelNNLanguageModel
+from celllm.plastic_checkpoint import (
+    load_plastic_checkpoint,
+    save_plastic_checkpoint,
+)
 
 
 def __getattr__(name: str) -> Any:
@@ -20,6 +24,10 @@ __all__ = [
     "CelNNLanguageModel",
     "GatedConvLM",
     "ModelConfig",
+    "PlasticCelNNLanguageModel",
+    "PlasticityConfig",
     "TrainConfig",
     "build_rung",
+    "load_plastic_checkpoint",
+    "save_plastic_checkpoint",
 ]

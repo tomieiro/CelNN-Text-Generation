@@ -58,3 +58,23 @@ class TrainConfig:
     seed: int = 42
     eval_every: int = 1_000
     eval_batches: int = 50
+
+
+@dataclass(frozen=True)
+class PlasticityConfig:
+    """Fast-weight memory settings for a plastic CellLM session."""
+
+    rule: str = "oja"
+    learning_rate: float = 0.01
+    decay: float = 0.99
+    alpha: float = 0.1
+    learnable_alpha: bool = True
+    detach_updates: bool = True
+    memory_limit: float | None = 1.0
+    chunk_size: int = 64
+
+    def __post_init__(self) -> None:
+        if self.rule not in {"hebbian", "oja"}:
+            raise ValueError("plasticity rule must be 'hebbian' or 'oja'")
+        if self.chunk_size < 1:
+            raise ValueError("chunk_size must be positive")

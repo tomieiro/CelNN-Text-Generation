@@ -8,8 +8,8 @@ from torch import nn
 from celnn import DifferentiableCellularNetwork
 from celnn import piecewise_linear as _piecewise_linear
 
-from celllm.config import ModelConfig
-from celllm.mixers import build_mixer
+from celllm.config import ModelConfig, PlasticityConfig
+from celllm.mixers import PlasticDenseMixer, build_mixer
 
 
 def piecewise_linear(x: torch.Tensor) -> torch.Tensor:
@@ -50,3 +50,30 @@ class CelNNCell(nn.Module):
             cell_input,
             extra_drive=self.mixer(x),
         )
+
+
+class PlasticCelNNCell(CelNNCell):
+    """CelNN cell whose dense channel drive has explicit fast weights."""
+
+    def __init__(
+        self, cfg: ModelConfig, plasticity: PlasticityConfig, causal: bool = True
+    ) -> None:
+        super().__init__(cfg, causal=causal)
+        self.mixer = PlasticDenseMixer(cfg.d, plasticity)
+
+    def new_plastic_state(self, batch_size: int):
+        return self.mixer.new_state(batch_size)
+
+    def step_with_memory(
+        self, x: torch.Tensor, cell_input: torch.Tensor, plastic_state
+    ) -> torch.Tensor:
+        """Advance without modifying memory inside the current block."""
+        return self.dynamics.step(
+            x,
+            cell_input,
+            extra_drive=self.mixer(x, plastic_state),
+        )
+
+    def observe(self, plastic_state, activity: torch.Tensor):
+        """Update memory only after the complete block has been evaluated."""
+        return self.mixer.observe(plastic_state, activity)
