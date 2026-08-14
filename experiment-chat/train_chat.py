@@ -18,6 +18,7 @@ from celllm.chat_data import (
     load_jsonl,
 )
 from celllm.chat_generation import ChatSession, SamplingConfig
+from celllm.chat_evaluation import evaluate_simple_chat
 from celllm.chat_model import CellLMChatModel
 from celllm.chat_tokenizer import ChatTokenizer
 from celllm.config import ModelConfig, PlasticityConfig
@@ -99,6 +100,23 @@ def samples(model, tokenizer, device: str) -> dict[str, str]:
         generated[prompt] = session.reply(prompt)
     model.train()
     return generated
+
+
+def chat_evaluation(model, tokenizer, device: str) -> dict:
+    """Evaluate the deterministic chat milestone used for model selection."""
+    session = ChatSession(
+        model,
+        tokenizer,
+        sampling=SamplingConfig(
+            max_new_tokens=40,
+            temperature=0,
+            top_k=0,
+            top_p=1,
+        ),
+    )
+    report = evaluate_simple_chat(session)
+    model.train()
+    return report
 
 
 def main() -> None:
@@ -200,6 +218,11 @@ def main() -> None:
     model.train()
     iterator = repeat_loader(train_loader)
     best_validation = float(checkpoint.get("metrics", {}).get("valid_loss", "inf"))
+    best_chat_rank = tuple(
+        checkpoint.get("metrics", {}).get(
+            "chat_rank", (-1, float("-inf"), float("-inf"))
+        )
+    )
     history = []
     for step in range(start_step, args.steps):
         tokens, mask = next(iterator)
@@ -222,11 +245,19 @@ def main() -> None:
         if current % args.eval_every == 0 or current == args.steps:
             validation = evaluate(model, valid_loader, args.device)
             generated = samples(model, tokenizer, args.device)
+            behavioral = chat_evaluation(model, tokenizer, args.device)
+            chat_rank = (
+                behavioral["passed"],
+                -behavioral["mean_repeated_bigram_rate"],
+                -validation,
+            )
             metrics = {
                 "step": current,
                 "train_loss": loss.item(),
                 "valid_loss": validation,
                 "samples": generated,
+                "behavioral": behavioral,
+                "chat_rank": chat_rank,
             }
             history.append(metrics)
             print(json.dumps(metrics), flush=True)
@@ -238,12 +269,23 @@ def main() -> None:
                     step=current,
                     metrics=metrics,
                 )
+            if chat_rank > best_chat_rank:
+                best_chat_rank = chat_rank
+                save_chat_checkpoint(
+                    output / "best-chat.pt",
+                    model,
+                    step=current,
+                    metrics=metrics,
+                )
         if current % args.checkpoint_every == 0:
             save_chat_checkpoint(
                 output / "progress.pt",
                 model,
                 step=current,
-                metrics={"valid_loss": best_validation},
+                metrics={
+                    "valid_loss": best_validation,
+                    "chat_rank": best_chat_rank,
+                },
                 optimizer_state=optimizer.state_dict(),
             )
 

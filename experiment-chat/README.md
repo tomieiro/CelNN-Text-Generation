@@ -51,6 +51,13 @@ at least five of seven cases, one of the two memory cases, and no severe
 repeated-bigram loop. A passing gate means the model reached this deliberately
 small milestone; it does not claim general language-model competence.
 
+The trainer keeps two independent model-selection artifacts: `best.pt` for
+minimum validation loss and `best-chat.pt` for the strongest behavioral score
+(using validation loss only as a tie-breaker). `final.pt` always contains the
+last requested step. The notebook evaluates `final.pt`, because job 11832
+showed that validation loss alone can favor an earlier checkpoint that is less
+useful as a chat model.
+
 To resume a timed-out run, copy `progress.pt` and `tokenizer.json` into
 `experiment-chat/resume/` before resubmitting. The notebook stages them into
 the durable output mount and continues from the saved optimizer step.
