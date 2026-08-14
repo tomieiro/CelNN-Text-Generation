@@ -5,3 +5,10 @@ __pycache__/
 *.egg-info/
 data/
 checkpoints/
+!chat/data/
+chat/data/*
+!chat/data/simple-dialogues.jsonl
+!experiment-chat/data/
+experiment-chat/data/*
+!experiment-chat/data/simple-dialogues.jsonl
+experiment-chat/resume/
