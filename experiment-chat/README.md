@@ -9,7 +9,9 @@ This self-contained bundle trains the first small English CellLM chat model:
 - assistant-only loss over conversations capped at 128 tokens;
 - BF16 training on CUDA;
 - rotating progress checkpoint every 250 steps;
-- validation and fixed-prompt samples every 500 steps.
+- validation and fixed-prompt samples every 500 steps;
+- deterministic behavioral evaluation for greeting, identity, everyday facts,
+  arithmetic, and recall from transient memory.
 
 The data mixes a deterministic 44-dialogue memory curriculum with 1,398 short
 examples filtered from the official SmolTalk
@@ -30,7 +32,7 @@ Submit it with:
 ```bash
 ovpn-job-submitter \
   experiment-chat/experiment-chat-gpu.ipynb \
-  /path/to/SSH \
+  /home/tomieiro/Desktop/SSH \
   --include-files \
   --partition arandu \
   --gpus 1 \
@@ -40,6 +42,14 @@ ovpn-job-submitter \
 ```
 
 Collect with `ovpn-job-submitter --collect-results <job-id>`.
+
+The collected `outputs/chat/evaluation.json` reports the overall keyword
+recall, per-category scores, every generated response, and a repeated-bigram
+rate to expose degenerate loops. It is an explicit acceptance report, not a
+replacement for reading the sample conversations. The initial gate requires
+at least five of seven cases, one of the two memory cases, and no severe
+repeated-bigram loop. A passing gate means the model reached this deliberately
+small milestone; it does not claim general language-model competence.
 
 To resume a timed-out run, copy `progress.pt` and `tokenizer.json` into
 `experiment-chat/resume/` before resubmitting. The notebook stages them into
