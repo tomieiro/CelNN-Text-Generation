@@ -1,7 +1,7 @@
 import torch
 
-from celllm.cell import CelNNCell, piecewise_linear
-from celllm.config import ModelConfig
+from celllm.cell import CelNNCell, PlasticCelNNCell, piecewise_linear
+from celllm.config import ModelConfig, PlasticityConfig
 
 
 def test_piecewise_linear_is_the_chua_saturation():
@@ -52,3 +52,23 @@ def test_bounded_drive_respects_the_input_constraint():
     huge = torch.full((1, 64, 8), 50.0)
     assert bounded_input(True).control_input(huge).abs().max() <= 1.0
     assert bounded_input(False).control_input(huge).abs().max() > 1.0
+
+
+def test_plastic_memory_observes_bounded_cell_output():
+    cfg = ModelConfig(n=4, d=2, r=1, k=3)
+    cell = PlasticCelNNCell(
+        cfg,
+        PlasticityConfig(
+            learning_rate=0.1,
+            decay=1.0,
+            memory_limit=None,
+            chunk_size=4,
+        ),
+    )
+    state = cell.new_plastic_state(1)
+
+    observed = cell.observe(state, torch.full((1, 4, 2), 1_000.0))
+
+    torch.testing.assert_close(
+        observed.memory, torch.full((1, 2, 2), 0.1)
+    )

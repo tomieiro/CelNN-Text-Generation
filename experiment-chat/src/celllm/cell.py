@@ -75,5 +75,6 @@ class PlasticCelNNCell(CelNNCell):
         )
 
     def observe(self, plastic_state, activity: torch.Tensor):
-        """Update memory only after the complete block has been evaluated."""
-        return self.mixer.observe(plastic_state, activity)
+        """Update memory from bounded Chua--Yang cell outputs."""
+        output = piecewise_linear(activity)
+        return self.mixer.observe(plastic_state, output)

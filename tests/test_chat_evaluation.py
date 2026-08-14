@@ -39,7 +39,7 @@ def test_evaluation_reports_cases_categories_and_resets():
     session = StubSession()
     report = evaluate_simple_chat(session, cases)
 
-    assert not report["accepted"]  # The full gate requires five cases.
+    assert not report["accepted"]  # The full gate also requires continuity.
     assert report["score"] == 1
     assert report["category_scores"] == {"conversation": 1, "memory": 1}
     assert report["mean_repeated_bigram_rate"] == 0

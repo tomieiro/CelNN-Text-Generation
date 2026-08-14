@@ -96,5 +96,82 @@ def build_simple_dialogues(
                 ),
             )
         )
+
+    identity_prompts = (
+        "tell me about yourself",
+        "what kind of model are you",
+        "can you introduce yourself",
+    )
+    for prompt in identity_prompts:
+        dialogues.append(
+            _conversation(
+                (prompt, "i am celllm a small conversational model")
+            )
+        )
+
+    for animal in ANIMALS:
+        dialogues.extend(
+            (
+                _conversation(
+                    (
+                        f"what do you think about {animal}",
+                        f"i think {animal} are interesting animals",
+                    )
+                ),
+                _conversation(
+                    (
+                        f"are {animal} interesting",
+                        f"yes {animal} are interesting animals",
+                    )
+                ),
+                _conversation(
+                    (
+                        f"tell me something about {animal}",
+                        f"{animal} are interesting animals",
+                    )
+                ),
+            )
+        )
+
+    for mood in MOODS:
+        for animal in ANIMALS:
+            dialogues.append(
+                _conversation(
+                    ("hi there", "hello how are you"),
+                    (
+                        f"i am feeling {mood} today",
+                        f"i am glad you told me you feel {mood}",
+                    ),
+                    (
+                        f"what do you think about {animal}",
+                        f"i think {animal} are interesting animals",
+                    ),
+                )
+            )
+
+    for name in NAMES:
+        dialogues.append(
+            _conversation(
+                (f"please remember my name is {name}", "i will remember that"),
+                ("can you tell me my name", f"your name is {name}"),
+            )
+        )
+    for color in COLORS:
+        dialogues.append(
+            _conversation(
+                (
+                    f"please remember that i like {color}",
+                    f"i will remember that you like {color}",
+                ),
+                ("which color do i like", f"you like {color}"),
+            )
+        )
+
+    arithmetic = (
+        ("can you add one and one", "one plus one is two"),
+        ("what do you get when you add two and three", "two plus three is five"),
+        ("please add three and three", "three plus three is six"),
+    )
+    dialogues.extend(_conversation(turn) for turn in arithmetic)
     randomizer.shuffle(dialogues)
     return dialogues

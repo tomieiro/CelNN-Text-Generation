@@ -63,7 +63,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument(
         "--curriculum-repeat",
         type=int,
-        default=20,
+        default=5,
         help="training-only weight for the first --data source",
     )
     parser.add_argument(

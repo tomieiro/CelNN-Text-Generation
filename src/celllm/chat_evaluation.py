@@ -62,6 +62,17 @@ SIMPLE_CHAT_CASES = (
             EvaluationTurn("what is my favorite color", ("purple",)),
         ),
     ),
+    EvaluationCase(
+        "natural-follow-up",
+        "continuity",
+        (
+            EvaluationTurn("hello", ("hello", "hi")),
+            EvaluationTurn(
+                "i am fine do you like horses", ("horse",)
+            ),
+            EvaluationTurn("what are you", ("celllm", "model")),
+        ),
+    ),
 )
 
 
@@ -125,14 +136,16 @@ def evaluate_simple_chat(
         turn["repeated_bigram_rate"] for turn in scored_responses
     ) / len(scored_responses)
     accepted = (
-        passed >= 5
+        passed >= 6
+        and category_scores.get("continuity", 0) == 1
         and category_scores.get("memory", 0) >= 0.5
         and mean_repetition <= 0.35
     )
     return {
         "accepted": accepted,
         "acceptance_criteria": {
-            "minimum_passed_cases": 5,
+            "minimum_passed_cases": 6,
+            "minimum_continuity_score": 1.0,
             "minimum_memory_score": 0.5,
             "maximum_mean_repeated_bigram_rate": 0.35,
         },

@@ -13,18 +13,18 @@ This self-contained bundle trains the first small English CellLM chat model:
 - deterministic behavioral evaluation for greeting, identity, everyday facts,
   arithmetic, and recall from transient memory.
 
-The data mixes a deterministic 44-dialogue memory curriculum with 1,398 short
+The data mixes a deterministic 102-dialogue memory curriculum with 1,398 short
 examples filtered from the official SmolTalk
 [`everyday-conversations`](https://huggingface.co/datasets/HuggingFaceTB/smoltalk)
 subset. The
-generated curriculum has a median length of 24 BPE tokens and a maximum of 30.
-A 16-token local context makes roughly 59% of those conversations cross a
+generated curriculum has a median length of 38 BPE tokens and a maximum of 58.
+A 16-token local context makes roughly 95% of those conversations cross a
 causal block boundary; the longer natural dialogues exercise several memory
 updates. A larger local context would let the model bypass plastic memory on
 most curriculum examples.
 
-The 44 curriculum dialogues are unique on disk. After the train/validation
-split, only the training portion is repeated 20 times to emphasize greetings,
+The 102 curriculum dialogues are unique on disk. After the train/validation
+split, only the training portion is repeated five times to emphasize greetings,
 preferences, and recall; validation never contains duplicated training rows.
 
 Submit it with:
@@ -46,10 +46,11 @@ Collect with `ovpn-job-submitter --collect-results <job-id>`.
 The collected `outputs/chat/evaluation.json` reports the overall keyword
 recall, per-category scores, every generated response, and a repeated-bigram
 rate to expose degenerate loops. It is an explicit acceptance report, not a
-replacement for reading the sample conversations. The initial gate requires
-at least five of seven cases, one of the two memory cases, and no severe
-repeated-bigram loop. A passing gate means the model reached this deliberately
-small milestone; it does not claim general language-model competence.
+replacement for reading the sample conversations. The expanded gate requires
+at least six of eight cases, the full natural three-turn conversation, one of
+the two memory cases, and no severe repeated-bigram loop. A passing gate means
+the model reached this deliberately small milestone; it does not claim general
+language-model competence.
 
 The trainer keeps two independent model-selection artifacts: `best.pt` for
 minimum validation loss and `best-chat.pt` for the strongest behavioral score
