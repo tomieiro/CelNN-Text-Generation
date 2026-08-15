@@ -9,11 +9,21 @@ from celllm.ablation import (
     AblationTrace,
 )
 from celllm.attention import (
+    BankWriteAction,
+    BankWriteCandidates,
     CausalFieldPropagation,
     ChuaYangHebbianFieldAttention,
     DeltaHebbianAttention,
     InterBlockFieldCarry,
     StateMatchedGlobalBankAttention,
+)
+from celllm.chat_stage8 import (
+    BankBlockDiagnostics,
+    BankTrajectoryMetrics,
+    CandidateUtility,
+    DialogueUtilityResult,
+    diagnose_bank_block,
+    evaluate_bank_write_utilities,
 )
 from celllm.config import (
     CYHFAConfig,
@@ -51,11 +61,17 @@ __all__ = [
     "AblationCondition",
     "AblationConfig",
     "AblationTrace",
+    "BankBlockDiagnostics",
+    "BankTrajectoryMetrics",
+    "BankWriteAction",
+    "BankWriteCandidates",
+    "CandidateUtility",
     "CYHFAConfig",
     "CYHFACelNNLanguageModel",
     "CausalFieldPropagation",
     "CelNNLanguageModel",
     "DeltaHebbianAttention",
+    "DialogueUtilityResult",
     "GatedConvLM",
     "HebbianAttentionCelNNLanguageModel",
     "HebbianAttentionConfig",
@@ -69,6 +85,8 @@ __all__ = [
     "StateMatchedGlobalBankAttention",
     "TrainConfig",
     "build_rung",
+    "diagnose_bank_block",
+    "evaluate_bank_write_utilities",
     "load_plastic_checkpoint",
     "save_plastic_checkpoint",
 ]

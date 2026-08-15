@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
+from enum import IntEnum
 
 import torch
 from celnn import (
@@ -19,6 +21,32 @@ from celllm.config import (
     HebbianAttentionConfig,
     StateMatchedBankConfig,
 )
+
+
+class BankWriteAction(IntEnum):
+    """One controlled intervention on a global-bank write candidate."""
+
+    FULL = 0
+    NO_ACTION = 1
+    DECAY_ONLY = 2
+    WRITE_NO_DECAY = 3
+
+
+@dataclass(frozen=True)
+class BankWriteCandidates:
+    """Projected BANK associations, controls, routing, and pre-write error."""
+
+    keys: torch.Tensor
+    values: torch.Tensor
+    rates: torch.Tensor
+    retentions: torch.Tensor
+    routing: torch.Tensor
+    associative_error: torch.Tensor | None
+
+    @property
+    def shape(self) -> torch.Size:
+        """Return the common batch/sequence candidate axes."""
+        return self.rates.shape
 
 
 class DeltaHebbianAttention(nn.Module):
@@ -240,6 +268,162 @@ class StateMatchedGlobalBankAttention(nn.Module):
         ) * controls[..., 1]
         return key, value, rate, retention
 
+    def prepare_write(
+        self,
+        state: AssociativeFieldState,
+        activity: torch.Tensor,
+        *,
+        measure_error: bool = True,
+    ) -> BankWriteCandidates:
+        """Prepare immutable candidates without changing fast memory.
+
+        The weighted error is measured against every routed slot before any
+        candidate in the block is committed. This mirrors the BANK rule,
+        whose completed block is observed only after its logits are fixed.
+        """
+        if activity.ndim != 3:
+            raise ValueError(
+                "activity must have shape (batch, sequence, features)"
+            )
+        keys, values, rates, retentions = self.associations(activity)
+        routing = self._routing(keys, self.write_temperature)
+        associative_error = None
+        if measure_error:
+            predictions = self.memory.read_all(state, keys)
+            with torch.autocast(
+                device_type=activity.device.type, enabled=False
+            ):
+                errors = (
+                    values.float().unsqueeze(-2) - predictions.float()
+                ).square().mean(dim=-1)
+                associative_error = (routing.float() * errors).sum(dim=-1)
+        return BankWriteCandidates(
+            keys=keys,
+            values=values,
+            rates=rates,
+            retentions=retentions,
+            routing=routing,
+            associative_error=associative_error,
+        )
+
+    @staticmethod
+    def _select_state(
+        selector: torch.Tensor,
+        selected: AssociativeFieldState,
+        fallback: AssociativeFieldState,
+    ) -> AssociativeFieldState:
+        """Select one state per batch item while retaining a shared counter."""
+        memory_selector = selector[:, None, None, None]
+        normalizer_selector = selector[:, None, None]
+        return AssociativeFieldState(
+            torch.where(
+                memory_selector, selected.memory, fallback.memory
+            ),
+            torch.where(
+                normalizer_selector,
+                selected.normalizer,
+                fallback.normalizer,
+            ),
+            selected.updates,
+        )
+
+    def apply_write(
+        self,
+        state: AssociativeFieldState,
+        candidates: BankWriteCandidates,
+        mask: torch.Tensor | None = None,
+        actions: torch.Tensor | None = None,
+    ) -> AssociativeFieldState:
+        """Commit candidates with independently controlled causal actions.
+
+        ``actions`` has the candidate batch/sequence shape and contains
+        :class:`BankWriteAction` values. A masked candidate is an exact tensor
+        identity. The update counter advances once per candidate to preserve
+        the original BANK bookkeeping, including for padding.
+        """
+        if mask is not None and mask.shape != candidates.shape:
+            raise ValueError("write mask must match candidate axes")
+        controlled = actions is not None
+        if actions is None:
+            actions = torch.full(
+                candidates.shape,
+                int(BankWriteAction.FULL),
+                dtype=torch.int64,
+                device=candidates.rates.device,
+            )
+        elif actions.shape != candidates.shape:
+            raise ValueError("write actions must match candidate axes")
+        if actions.dtype == torch.bool or actions.is_floating_point():
+            raise ValueError("write actions must use an integer dtype")
+        minimum = int(actions.min().item())
+        maximum = int(actions.max().item())
+        if minimum < int(BankWriteAction.FULL) or maximum > int(
+            BankWriteAction.WRITE_NO_DECAY
+        ):
+            raise ValueError("unknown BANK write action")
+
+        next_state = state
+        slots = self.config.slots
+        for index in range(candidates.shape[1]):
+            assignment = candidates.routing[:, index]
+            rate = candidates.rates[:, index, None].float() * assignment
+            retention = 1.0 - assignment * (
+                1.0 - candidates.retentions[:, index, None].float()
+            )
+            key = candidates.keys[:, index, None].expand(-1, slots, -1)
+            value = candidates.values[:, index, None].expand(-1, slots, -1)
+            full = self.memory.write(
+                next_state,
+                key,
+                value,
+                learning_rate=rate,
+                retention=retention,
+            )
+            identity = AssociativeFieldState(
+                next_state.memory,
+                next_state.normalizer,
+                next_state.updates + 1,
+            )
+            if not controlled:
+                updated = full
+                if mask is not None:
+                    updated = self._select_state(
+                        ~mask[:, index].bool(), identity, updated
+                    )
+                next_state = updated
+                continue
+            no_decay = self.memory.write(
+                next_state,
+                key,
+                value,
+                learning_rate=rate,
+                retention=torch.ones_like(retention),
+            )
+            decay = AssociativeFieldState(
+                retention[..., None, None] * next_state.memory,
+                retention[..., None] * next_state.normalizer,
+                next_state.updates + 1,
+            )
+            action = actions[:, index]
+            updated = full
+            updated = self._select_state(
+                action == int(BankWriteAction.NO_ACTION), identity, updated
+            )
+            updated = self._select_state(
+                action == int(BankWriteAction.DECAY_ONLY), decay, updated
+            )
+            updated = self._select_state(
+                action == int(BankWriteAction.WRITE_NO_DECAY),
+                no_decay,
+                updated,
+            )
+            if mask is not None:
+                updated = self._select_state(
+                    ~mask[:, index].bool(), identity, updated
+                )
+            next_state = updated
+        return next_state
+
     def write(
         self,
         state: AssociativeFieldState,
@@ -247,34 +431,10 @@ class StateMatchedGlobalBankAttention(nn.Module):
         mask: torch.Tensor | None = None,
     ) -> AssociativeFieldState:
         """Route completed-block associations into independent global slots."""
-        if activity.ndim != 3:
-            raise ValueError("activity must have shape (batch, sequence, features)")
-        if mask is not None and mask.shape != activity.shape[:2]:
-            raise ValueError("write mask must match batch and sequence axes")
-        keys, values, rates, retentions = self.associations(activity)
-        routing = self._routing(keys, self.write_temperature)
-        next_state = state
-        slots = self.config.slots
-        for index in range(activity.shape[1]):
-            assignment = routing[:, index]
-            rate = rates[:, index, None].float() * assignment
-            retention = 1.0 - assignment * (
-                1.0 - retentions[:, index, None].float()
-            )
-            if mask is not None:
-                active = mask[:, index, None].to(rate.dtype)
-                rate = rate * active
-                retention = retention * active + (1.0 - active)
-            key = keys[:, index, None].expand(-1, slots, -1)
-            value = values[:, index, None].expand(-1, slots, -1)
-            next_state = self.memory.write(
-                next_state,
-                key,
-                value,
-                learning_rate=rate,
-                retention=retention,
-            )
-        return next_state
+        candidates = self.prepare_write(
+            state, activity, measure_error=False
+        )
+        return self.apply_write(state, candidates, mask=mask)
 
 
 class CausalFieldPropagation(nn.Module):

@@ -160,6 +160,25 @@ class StateMatchedBankCelNNCell(CelNNCell):
         retrieval_enabled: bool = True,
         trace: AblationTrace | None = None,
     ) -> torch.Tensor:
+        next_state, _ = self.refine_with_memory(
+            x,
+            cell_input,
+            memory_state,
+            retrieval_enabled=retrieval_enabled,
+            trace=trace,
+        )
+        return next_state
+
+    def refine_with_memory(
+        self,
+        x: torch.Tensor,
+        cell_input: torch.Tensor,
+        memory_state,
+        *,
+        retrieval_enabled: bool = True,
+        trace: AblationTrace | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Advance once and expose the retrieval drive for diagnostics."""
         output = piecewise_linear(x)
         memory_drive = self.attention.retrieve(
             output,
@@ -167,11 +186,12 @@ class StateMatchedBankCelNNCell(CelNNCell):
             enabled=retrieval_enabled,
             trace=trace,
         )
-        return self.dynamics.step(
+        next_state = self.dynamics.step(
             x,
             cell_input,
             extra_drive=self.mixer(x) + memory_drive,
         )
+        return next_state, memory_drive
 
     def observe(
         self,

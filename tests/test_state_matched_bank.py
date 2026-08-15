@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import torch
+from celnn import AssociativeFieldState
 
+from celllm.attention import BankWriteAction
+from celllm.chat_stage8 import (
+    diagnose_bank_block,
+    evaluate_bank_write_utilities,
+)
 from celllm.chat_model import CellLMChatModel
 from celllm.config import (
     CYHFAConfig,
@@ -133,3 +139,136 @@ def test_chat_loss_reaches_bank_routing_and_associative_parameters():
     ):
         assert parameter.grad is not None
         assert torch.isfinite(parameter.grad).all()
+
+
+def test_prepared_full_write_matches_public_bank_write():
+    torch.manual_seed(15)
+    model = make_bank().eval()
+    attention = model.core.cell.attention
+    state = model.new_plastic_state(2)
+    activity = torch.randn(2, 4, model.cfg.d).tanh()
+    mask = torch.tensor(
+        [[True, True, True, False], [True, True, True, True]]
+    )
+
+    candidates = attention.prepare_write(state, activity)
+    prepared = attention.apply_write(state, candidates, mask=mask)
+    public = attention.write(state, activity, mask=mask)
+
+    torch.testing.assert_close(prepared.memory, public.memory)
+    torch.testing.assert_close(prepared.normalizer, public.normalizer)
+    assert prepared.updates == public.updates
+
+
+def test_bank_write_interventions_have_exact_state_semantics():
+    torch.manual_seed(16)
+    model = make_bank().eval()
+    attention = model.core.cell.attention
+    base = model.new_plastic_state(1)
+    seeded = AssociativeFieldState(
+        torch.randn_like(base.memory),
+        torch.rand_like(base.normalizer),
+        updates=3,
+    )
+    activity = torch.randn(1, 1, model.cfg.d).tanh()
+    candidates = attention.prepare_write(seeded, activity)
+
+    no_action = attention.apply_write(
+        seeded,
+        candidates,
+        actions=torch.tensor([[int(BankWriteAction.NO_ACTION)]]),
+    )
+    torch.testing.assert_close(no_action.memory, seeded.memory, rtol=0, atol=0)
+    torch.testing.assert_close(
+        no_action.normalizer, seeded.normalizer, rtol=0, atol=0
+    )
+
+    decay_only = attention.apply_write(
+        seeded,
+        candidates,
+        actions=torch.tensor([[int(BankWriteAction.DECAY_ONLY)]]),
+    )
+    assignment = candidates.routing[:, 0]
+    retention = 1.0 - assignment * (
+        1.0 - candidates.retentions[:, 0, None].float()
+    )
+    torch.testing.assert_close(
+        decay_only.memory,
+        retention[..., None, None] * seeded.memory,
+    )
+    torch.testing.assert_close(
+        decay_only.normalizer,
+        retention[..., None] * seeded.normalizer,
+    )
+
+
+def test_bank_diagnostic_path_reproduces_normal_block_and_is_fp32():
+    torch.manual_seed(17)
+    model = make_bank().eval()
+    tokens = torch.randint(6, 300, (2, 4))
+    memory = model.new_plastic_state(2)
+
+    expected_logits, expected_memory = model.forward_with_state(tokens, memory)
+    observed = diagnose_bank_block(model, tokens, memory)
+
+    torch.testing.assert_close(observed.logits, expected_logits)
+    torch.testing.assert_close(
+        observed.next_memory.memory, expected_memory.memory
+    )
+    torch.testing.assert_close(
+        observed.next_memory.normalizer, expected_memory.normalizer
+    )
+    assert observed.metrics.trajectory_energy.dtype == torch.float32
+    assert observed.metrics.memory_trajectory_energy.dtype == torch.float32
+    assert observed.candidates.associative_error.dtype == torch.float32
+    assert torch.isfinite(observed.metrics.trajectory_energy).all()
+
+
+def test_post_block_write_action_cannot_change_current_logits():
+    torch.manual_seed(18)
+    model = make_bank().eval()
+    tokens = torch.randint(6, 300, (1, 4))
+    memory = model.new_plastic_state(1)
+    observed = diagnose_bank_block(model, tokens, memory)
+    actions = torch.full(
+        tokens.shape,
+        int(BankWriteAction.FULL),
+        dtype=torch.int64,
+    )
+    actions[:, 2] = int(BankWriteAction.NO_ACTION)
+    counterfactual = model.core.cell.attention.apply_write(
+        memory, observed.candidates, actions=actions
+    )
+
+    torch.testing.assert_close(
+        observed.logits,
+        model.forward_with_state(tokens, memory, update_memory=False)[0],
+    )
+    assert not torch.equal(counterfactual.memory, observed.next_memory.memory)
+
+
+def test_write_utility_scores_only_future_assistant_targets():
+    torch.manual_seed(19)
+    model = make_bank().eval()
+    tokens = torch.randint(6, 300, (12,))
+    assistant = torch.zeros(12, dtype=torch.bool)
+    assistant[5:] = True
+
+    result = evaluate_bank_write_utilities(
+        model,
+        tokens,
+        assistant,
+        dialogue_id=9,
+        horizons=(1,),
+        actions=(BankWriteAction.NO_ACTION,),
+        max_candidates=2,
+    )
+
+    assert result.dialogue_id == 9
+    assert result.normal_token_count == 7
+    assert len(result.candidates) == 2
+    for candidate in result.candidates:
+        utility = candidate.utilities["no_action"][1]
+        assert utility is not None
+        assert torch.isfinite(torch.tensor(utility))
+        assert candidate.evaluated_tokens[1] > 0
