@@ -195,6 +195,146 @@ def _loss_sum(
     return (losses * target_mask).sum(), count
 
 
+def _repeat_state(
+    state: AssociativeFieldState, copies: int
+) -> AssociativeFieldState:
+    """Broadcast one immutable memory state over a counterfactual batch."""
+    return AssociativeFieldState(
+        state.memory.expand(copies, *state.memory.shape[1:]),
+        state.normalizer.expand(copies, *state.normalizer.shape[1:]),
+        state.updates,
+    )
+
+
+def _repeat_candidates(
+    candidates: BankWriteCandidates, copies: int
+) -> BankWriteCandidates:
+    """Broadcast prepared candidates without copying their storage."""
+    error = candidates.associative_error
+    return BankWriteCandidates(
+        keys=candidates.keys.expand(copies, *candidates.keys.shape[1:]),
+        values=candidates.values.expand(copies, *candidates.values.shape[1:]),
+        rates=candidates.rates.expand(copies, *candidates.rates.shape[1:]),
+        retentions=candidates.retentions.expand(
+            copies, *candidates.retentions.shape[1:]
+        ),
+        routing=candidates.routing.expand(
+            copies, *candidates.routing.shape[1:]
+        ),
+        associative_error=(
+            None
+            if error is None
+            else error.expand(copies, *error.shape[1:])
+        ),
+    )
+
+
+def _counterfactual_loss_sums(
+    logits: torch.Tensor,
+    tokens: torch.Tensor,
+    assistant_mask: torch.Tensor,
+) -> tuple[torch.Tensor, int]:
+    """Return one loss sum per counterfactual on a shared target scope."""
+    length = min(logits.shape[1], tokens.shape[1] - 1)
+    target_mask = assistant_mask[:, 1 : length + 1]
+    count = int(target_mask.sum().item())
+    if count == 0:
+        return logits.new_zeros(logits.shape[0], dtype=torch.float32), 0
+    targets = tokens[:, 1 : length + 1].expand(logits.shape[0], -1)
+    losses = F.cross_entropy(
+        logits[:, :length].float().reshape(-1, logits.shape[-1]),
+        targets.reshape(-1),
+        reduction="none",
+    ).reshape(logits.shape[0], length)
+    return (losses * target_mask.expand_as(losses)).sum(dim=1), count
+
+
+def _batched_action_utilities(
+    model: CellLMChatModel,
+    *,
+    chunks: tuple[torch.Tensor, ...],
+    mask_chunks: tuple[torch.Tensor, ...],
+    token_ids: torch.Tensor,
+    assistant_mask: torch.Tensor,
+    normal_logits: torch.Tensor,
+    input_memory: AssociativeFieldState,
+    observed: BankBlockDiagnostics,
+    block_index: int,
+    positions: list[int],
+    action: BankWriteAction,
+    horizons: tuple[int, ...],
+) -> tuple[dict[int, dict[int, float | None]], dict[int, int]]:
+    """Evaluate one action for every selected position in a single batch."""
+    candidate_copies = len(positions)
+    copies = candidate_copies + 1
+    chunk = chunks[block_index]
+    write_mask = mask_chunks[block_index]
+    actions = torch.full(
+        (copies, chunk.shape[1]),
+        int(BankWriteAction.FULL),
+        dtype=torch.int64,
+        device=chunk.device,
+    )
+    rows = torch.arange(candidate_copies, device=chunk.device)
+    columns = torch.tensor(positions, device=chunk.device)
+    actions[rows, columns] = int(action)
+    counter_memory = model.core.cell.attention.apply_write(
+        _repeat_state(input_memory, copies),
+        _repeat_candidates(observed.candidates, copies),
+        mask=write_mask.expand(copies, -1),
+        actions=actions,
+    )
+    maximum_horizon = horizons[-1]
+    counter_logits = []
+    for future_index in range(
+        block_index + 1,
+        min(len(chunks), block_index + 1 + maximum_horizon),
+    ):
+        future_tokens = chunks[future_index].expand(copies, -1)
+        future_mask = mask_chunks[future_index].expand(copies, -1)
+        logits, counter_memory = model.forward_with_state(
+            future_tokens,
+            counter_memory,
+            write_mask=future_mask,
+        )
+        counter_logits.append(logits)
+
+    start = (block_index + 1) * model.chunk_size
+    values = {position: {} for position in positions}
+    counts = {}
+    for horizon in horizons:
+        available = min(horizon, len(counter_logits))
+        stop = min(
+            start + available * model.chunk_size,
+            token_ids.shape[1],
+        )
+        _, count = _loss_sum(
+            normal_logits,
+            token_ids,
+            assistant_mask,
+            start,
+            stop,
+        )
+        counts[horizon] = count if available == horizon else 0
+        if count == 0 or available < horizon:
+            for position in positions:
+                values[position][horizon] = None
+            continue
+        joined = torch.cat(counter_logits[:horizon], dim=1)
+        counter_sums, counter_count = _counterfactual_loss_sums(
+            joined,
+            token_ids[:, start : start + joined.shape[1] + 1],
+            assistant_mask[:, start : start + joined.shape[1] + 1],
+        )
+        if counter_count != count:
+            raise RuntimeError("counterfactual token scope changed")
+        reference_sum = counter_sums[-1]
+        deltas = (counter_sums[:-1] - reference_sum) / count
+        for row, position in enumerate(positions):
+            values[position][horizon] = float(deltas[row].item())
+    return values, counts
+
+
 @torch.inference_mode()
 def evaluate_bank_write_utilities(
     model: CellLMChatModel,
@@ -252,7 +392,6 @@ def evaluate_bank_write_utilities(
         raise ValueError("dialogue has no assistant targets")
 
     rows: list[CandidateUtility] = []
-    maximum_horizon = requested_horizons[-1]
     scope_counts: dict[int, dict[int, int]] = {}
     coordinates: list[tuple[int, int]] = []
     for block_index, (chunk, write_mask) in enumerate(
@@ -297,73 +436,42 @@ def evaluate_bank_write_utilities(
             ]
             coordinates = [coordinates[index] for index in indices]
 
+    grouped_positions: dict[int, list[int]] = {}
+    for block_index, position in coordinates:
+        grouped_positions.setdefault(block_index, []).append(position)
+    utility_cache: dict[
+        tuple[int, BankWriteAction], dict[int, dict[int, float | None]]
+    ] = {}
+    count_cache: dict[int, dict[int, int]] = {}
+    for block_index, positions in grouped_positions.items():
+        for action in requested_actions:
+            values, counts = _batched_action_utilities(
+                model,
+                chunks=chunks,
+                mask_chunks=mask_chunks,
+                token_ids=token_ids,
+                assistant_mask=assistant_mask,
+                normal_logits=normal_logits,
+                input_memory=input_memories[block_index],
+                observed=diagnostics[block_index],
+                block_index=block_index,
+                positions=positions,
+                action=action,
+                horizons=requested_horizons,
+            )
+            utility_cache[(block_index, action)] = values
+            count_cache[block_index] = counts
+
     for block_index, position in coordinates:
         chunk = chunks[block_index]
         write_mask = mask_chunks[block_index]
         observed = diagnostics[block_index]
         block_start = (block_index + 1) * model.chunk_size
         utilities: dict[str, dict[int, float | None]] = {}
-        counts: dict[int, int] = {}
         for action in requested_actions:
-            action_map = torch.full(
-                chunk.shape,
-                int(BankWriteAction.FULL),
-                dtype=torch.int64,
-                device=chunk.device,
-            )
-            action_map[0, position] = int(action)
-            counter_memory = model.core.cell.attention.apply_write(
-                input_memories[block_index],
-                observed.candidates,
-                mask=write_mask,
-                actions=action_map,
-            )
-            counter_logits = []
-            for future_index in range(
-                block_index + 1,
-                min(len(chunks), block_index + 1 + maximum_horizon),
-            ):
-                logits, counter_memory = model.forward_with_state(
-                    chunks[future_index],
-                    counter_memory,
-                    write_mask=mask_chunks[future_index],
-                )
-                counter_logits.append(logits)
-            action_utilities: dict[int, float | None] = {}
-            for horizon in requested_horizons:
-                available = min(horizon, len(counter_logits))
-                start = block_start
-                stop = min(
-                    start + available * model.chunk_size,
-                    token_ids.shape[1],
-                )
-                normal_sum, count = _loss_sum(
-                    normal_logits,
-                    token_ids,
-                    assistant_mask,
-                    start,
-                    stop,
-                )
-                if count == 0 or available < horizon:
-                    action_utilities[horizon] = None
-                else:
-                    joined = torch.cat(counter_logits[:horizon], dim=1)
-                    counter_sum, counter_count = _loss_sum(
-                        joined,
-                        token_ids[:, start : start + joined.shape[1] + 1],
-                        assistant_mask[
-                            :, start : start + joined.shape[1] + 1
-                        ],
-                        0,
-                        joined.shape[1],
-                    )
-                    if counter_count != count:
-                        raise RuntimeError("counterfactual token scope changed")
-                    action_utilities[horizon] = float(
-                        ((counter_sum - normal_sum) / count).item()
-                    )
-                counts[horizon] = count if available == horizon else 0
-            utilities[action.name.lower()] = action_utilities
+            utilities[action.name.lower()] = utility_cache[
+                (block_index, action)
+            ][position]
 
         routing = observed.candidates.routing[0, position].float()
         metrics = observed.metrics
@@ -414,7 +522,7 @@ def evaluate_bank_write_utilities(
                     metrics.retrieval_drive_energy[0, position].item()
                 ),
                 utilities=utilities,
-                evaluated_tokens=counts,
+                evaluated_tokens=count_cache[block_index],
             )
         )
     return DialogueUtilityResult(
