@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 
 from celllm.chat_generation import ChatSession
@@ -75,6 +76,26 @@ SIMPLE_CHAT_CASES = (
     ),
 )
 
+_WORD = re.compile(r"[^\W_]+(?:'[^\W_]+)?", flags=re.UNICODE)
+
+
+def normalized_words(text: str) -> tuple[str, ...]:
+    """Tokenize normalized words for conservative behavioral matching."""
+    return tuple(_WORD.findall(text.casefold()))
+
+
+def contains_expected(response: str, expected: str) -> bool:
+    """Match a complete normalized word sequence, never an arbitrary substring."""
+    response_words = normalized_words(response)
+    expected_words = normalized_words(expected)
+    if not expected_words:
+        return False
+    width = len(expected_words)
+    return any(
+        response_words[index : index + width] == expected_words
+        for index in range(len(response_words) - width + 1)
+    )
+
 
 def repeated_bigram_rate(text: str) -> float:
     """Return the fraction of word bigrams that repeat within one answer."""
@@ -96,9 +117,9 @@ def evaluate_simple_chat(
         turns = []
         for turn in case.turns:
             response = session.reply(turn.prompt)
-            normalized = response.lower()
             passed = not turn.expected_any or any(
-                keyword in normalized for keyword in turn.expected_any
+                contains_expected(response, keyword)
+                for keyword in turn.expected_any
             )
             turns.append(
                 {

@@ -97,3 +97,32 @@ resume `celllm-chat-cy-hfa` checkpoints for the default `--attention field`
 run. Global Delta-Hebb checkpoints require `--attention global`; the Oja
 checkpoints from jobs 11832 and 11833 are intentionally rejected. State-matched
 bank checkpoints require `--attention bank`.
+
+## Stage 7 frozen-checkpoint ablations
+
+`run_stage7.py` compares the collected `best.pt` checkpoints without training
+or changing their parameters. It first reproduces each stored validation NLL
+within `1e-4`; a failed reproduction stops the protocol before any ablation.
+
+The full-validation regime evaluates normal, no retrieval, no carry, and (for
+CY-HFA) no diffusion. Zero-history and no-write use matched response suffixes
+that cross a real 16-token boundary, preserving the chunking seen in training.
+The report keeps these regimes separate and bootstraps paired differences by
+dialogue.
+
+```bash
+python experiment-chat/run_stage7.py \
+  --field experiment-chat/.dgx-results/11834/chat/best.pt \
+  --bank experiment-chat/.dgx-results/11835/chat-bank/best.pt \
+  --data \
+    experiment-chat/data/simple-dialogues.jsonl \
+    experiment-chat/data/smoltalk-everyday.jsonl \
+  --output stage7-results.json \
+  --device cuda \
+  --behavior
+```
+
+The JSON retains per-dialogue `(loss_sum, token_count)` sufficient statistics;
+the adjacent Markdown file contains compact result tables. The corrected
+behavioral evaluator matches complete normalized words, so `hi` no longer
+matches `think`, `this`, or `while`.

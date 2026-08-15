@@ -8,6 +8,7 @@ from torch import nn
 from celnn import DifferentiableCellularNetwork
 from celnn import piecewise_linear as _piecewise_linear
 
+from celllm.ablation import AblationTrace
 from celllm.config import ModelConfig, PlasticityConfig
 from celllm.attention import (
     ChuaYangHebbianFieldAttention,
@@ -106,11 +107,22 @@ class HebbianAttentionCelNNCell(CelNNCell):
         return self.attention.new_state(batch_size)
 
     def step_with_memory(
-        self, x: torch.Tensor, cell_input: torch.Tensor, memory_state
+        self,
+        x: torch.Tensor,
+        cell_input: torch.Tensor,
+        memory_state,
+        *,
+        retrieval_enabled: bool = True,
+        trace: AblationTrace | None = None,
     ) -> torch.Tensor:
         """Read fixed fast weights while advancing one cellular step."""
         output = piecewise_linear(x)
-        memory_drive = self.attention.retrieve(output, memory_state)
+        memory_drive = self.attention.retrieve(
+            output,
+            memory_state,
+            enabled=retrieval_enabled,
+            trace=trace,
+        )
         return self.dynamics.step(
             x,
             cell_input,
@@ -140,20 +152,55 @@ class StateMatchedBankCelNNCell(CelNNCell):
         return self.attention.new_state(batch_size)
 
     def step_with_memory(
-        self, x: torch.Tensor, cell_input: torch.Tensor, memory_state
+        self,
+        x: torch.Tensor,
+        cell_input: torch.Tensor,
+        memory_state,
+        *,
+        retrieval_enabled: bool = True,
+        trace: AblationTrace | None = None,
     ) -> torch.Tensor:
         output = piecewise_linear(x)
-        memory_drive = self.attention.retrieve(output, memory_state)
+        memory_drive = self.attention.retrieve(
+            output,
+            memory_state,
+            enabled=retrieval_enabled,
+            trace=trace,
+        )
         return self.dynamics.step(
             x,
             cell_input,
             extra_drive=self.mixer(x) + memory_drive,
         )
 
-    def observe(self, memory_state, activity: torch.Tensor, mask=None):
-        return self.attention.write(
-            memory_state, piecewise_linear(activity), mask=mask
+    def observe(
+        self,
+        memory_state,
+        activity: torch.Tensor,
+        mask=None,
+        *,
+        write_enabled: bool = True,
+        trace: AblationTrace | None = None,
+    ):
+        updated = (
+            self.attention.write(
+                memory_state, piecewise_linear(activity), mask=mask
+            )
+            if write_enabled
+            else memory_state
         )
+        if trace is not None:
+            trace.record_delta(
+                "write_memory_delta",
+                memory_state.memory,
+                updated.memory,
+            )
+            trace.record_delta(
+                "write_normalizer_delta",
+                memory_state.normalizer,
+                updated.normalizer,
+            )
+        return updated
 
 
 class CYHFACelNNCell(CelNNCell):
@@ -181,10 +228,19 @@ class CYHFACelNNCell(CelNNCell):
         field_state,
         *,
         write_mask: torch.Tensor | None = None,
+        retrieval_enabled: bool = True,
+        write_enabled: bool = True,
+        diffusion_enabled: bool = True,
+        trace: AblationTrace | None = None,
     ):
         """Advance ``(x, M, s)`` by one coupled causal refinement step."""
         output = piecewise_linear(x)
-        memory_drive = self.attention.retrieve(output, field_state)
+        memory_drive = self.attention.retrieve(
+            output,
+            field_state,
+            enabled=retrieval_enabled,
+            trace=trace,
+        )
         next_x = self.dynamics.step(
             x,
             cell_input,
@@ -194,5 +250,8 @@ class CYHFACelNNCell(CelNNCell):
             field_state,
             piecewise_linear(next_x),
             mask=write_mask,
+            write_enabled=write_enabled,
+            diffusion_enabled=diffusion_enabled,
+            trace=trace,
         )
         return next_x, next_field

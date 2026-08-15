@@ -2,6 +2,12 @@
 
 from typing import Any
 
+from celllm.ablation import (
+    NORMAL_ABLATION,
+    AblationCondition,
+    AblationConfig,
+    AblationTrace,
+)
 from celllm.attention import (
     CausalFieldPropagation,
     ChuaYangHebbianFieldAttention,
@@ -41,6 +47,10 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "RUNGS",
+    "NORMAL_ABLATION",
+    "AblationCondition",
+    "AblationConfig",
+    "AblationTrace",
     "CYHFAConfig",
     "CYHFACelNNLanguageModel",
     "CausalFieldPropagation",

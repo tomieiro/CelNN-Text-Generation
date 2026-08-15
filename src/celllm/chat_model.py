@@ -6,6 +6,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from celllm.ablation import (
+    NORMAL_ABLATION,
+    AblationConfig,
+    AblationTrace,
+)
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
@@ -120,17 +125,28 @@ class CellLMChatModel(nn.Module):
         if self.uses_associative_state:
             if "update_plasticity" in kwargs:
                 kwargs["update_memory"] = kwargs.pop("update_plasticity")
+        else:
+            ablation = kwargs.pop("ablation", NORMAL_ABLATION)
+            kwargs.pop("trace", None)
+            if ablation != NORMAL_ABLATION:
+                raise ValueError("associative ablations require associative state")
         return self.core.forward_with_state(*args, **kwargs)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.core(token_ids)
 
-    def loss(
-        self, token_ids: torch.Tensor, assistant_mask: torch.Tensor
+    def sequence_logits(
+        self,
+        token_ids: torch.Tensor,
+        *,
+        ablation: AblationConfig = NORMAL_ABLATION,
+        trace: AblationTrace | None = None,
     ) -> torch.Tensor:
-        """Cross-entropy only where the next token belongs to the assistant."""
-        if token_ids.shape != assistant_mask.shape:
-            raise ValueError("token_ids and assistant_mask must have same shape")
+        """Run native chunks while preserving explicit associative state."""
+        if token_ids.ndim != 2:
+            raise ValueError("token_ids must have shape (batch, sequence)")
+        if not self.uses_associative_state and ablation != NORMAL_ABLATION:
+            raise ValueError("associative ablations require associative state")
         memory = self.new_plastic_state(token_ids.shape[0])
         logits = []
         token_chunks = token_ids.split(self.chunk_size, dim=1)
@@ -141,11 +157,28 @@ class CellLMChatModel(nn.Module):
                 if self.uses_associative_state
                 else {}
             )
+            if self.uses_associative_state:
+                kwargs.update({"ablation": ablation, "trace": trace})
             chunk_logits, memory = self.forward_with_state(
                 chunk, memory, **kwargs
             )
             logits.append(chunk_logits)
-        predictions = torch.cat(logits, dim=1)[:, :-1]
+        return torch.cat(logits, dim=1)
+
+    def loss_statistics(
+        self,
+        token_ids: torch.Tensor,
+        assistant_mask: torch.Tensor,
+        *,
+        ablation: AblationConfig = NORMAL_ABLATION,
+        trace: AblationTrace | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return assistant NLL sums and token counts for each dialogue."""
+        if token_ids.shape != assistant_mask.shape:
+            raise ValueError("token_ids and assistant_mask must have same shape")
+        predictions = self.sequence_logits(
+            token_ids, ablation=ablation, trace=trace
+        )[:, :-1]
         targets = token_ids[:, 1:]
         mask = assistant_mask[:, 1:]
         if not torch.any(mask):
@@ -155,4 +188,21 @@ class CellLMChatModel(nn.Module):
             targets.reshape(-1),
             reduction="none",
         ).reshape_as(targets)
-        return losses[mask].mean()
+        return (losses * mask).sum(dim=1), mask.sum(dim=1)
+
+    def loss(
+        self,
+        token_ids: torch.Tensor,
+        assistant_mask: torch.Tensor,
+        *,
+        ablation: AblationConfig = NORMAL_ABLATION,
+        trace: AblationTrace | None = None,
+    ) -> torch.Tensor:
+        """Cross-entropy only where the next token belongs to the assistant."""
+        loss_sums, token_counts = self.loss_statistics(
+            token_ids,
+            assistant_mask,
+            ablation=ablation,
+            trace=trace,
+        )
+        return loss_sums.sum() / token_counts.sum()

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 
+from celllm.ablation import NORMAL_ABLATION, AblationConfig
 from celllm.chat_model import CellLMChatModel
 from celllm.chat_tokenizer import ChatTokenizer
 
@@ -90,11 +91,13 @@ class ChatSession:
         *,
         sampling: SamplingConfig | None = None,
         generator: torch.Generator | None = None,
+        ablation: AblationConfig = NORMAL_ABLATION,
     ) -> None:
         self.model = model.eval()
         self.tokenizer = tokenizer
         self.sampling = sampling or SamplingConfig()
         self.generator = generator
+        self.ablation = ablation
         self.device = next(model.parameters()).device
         self.reset()
 
@@ -123,7 +126,10 @@ class ChatSession:
                 device=self.device,
             ).unsqueeze(0)
             _, self.memory = self.model.forward_with_state(
-                chunk, self.memory, update_plasticity=True
+                chunk,
+                self.memory,
+                update_plasticity=True,
+                ablation=self.ablation,
             )
             del self.pending[: self.model.cfg.n]
 
@@ -150,7 +156,10 @@ class ChatSession:
                 self.pending, dtype=torch.long, device=self.device
             ).unsqueeze(0)
             logits, _ = self.model.forward_with_state(
-                tokens, self.memory, update_plasticity=False
+                tokens,
+                self.memory,
+                update_plasticity=False,
+                ablation=self.ablation,
             )
             token = sample_token(
                 logits[0, -1],

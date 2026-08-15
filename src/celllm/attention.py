@@ -13,6 +13,7 @@ from celnn import (
 )
 from torch import nn
 
+from celllm.ablation import AblationTrace
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
@@ -61,11 +62,23 @@ class DeltaHebbianAttention(nn.Module):
         """Create empty fast weights on the projection parameters' device."""
         return self.memory.new_state(batch_size, like=self.query.weight)
 
-    def retrieve(self, activity: torch.Tensor, state) -> torch.Tensor:
+    def retrieve(
+        self,
+        activity: torch.Tensor,
+        state,
+        *,
+        enabled: bool = True,
+        trace: AblationTrace | None = None,
+    ) -> torch.Tensor:
         """Return a dense CelNN drive retrieved without changing memory."""
         query = self.query(activity)
         retrieved = self.memory.read(state, query)
-        return self.retrieval_scale * self.output(retrieved)
+        drive = self.retrieval_scale * self.output(retrieved)
+        if not enabled:
+            drive = torch.zeros_like(drive)
+        if trace is not None:
+            trace.record("retrieval_drive", drive)
+        return drive
 
     def associations(
         self, activity: torch.Tensor
@@ -190,7 +203,12 @@ class StateMatchedGlobalBankAttention(nn.Module):
             return torch.softmax(scores / temperature.float(), dim=-1)
 
     def retrieve(
-        self, activity: torch.Tensor, state: AssociativeFieldState
+        self,
+        activity: torch.Tensor,
+        state: AssociativeFieldState,
+        *,
+        enabled: bool = True,
+        trace: AblationTrace | None = None,
     ) -> torch.Tensor:
         """Read all past-only slots and route each query without topology."""
         query = self.query(activity)
@@ -203,7 +221,12 @@ class StateMatchedGlobalBankAttention(nn.Module):
                 "b...s,b...sv->b...v", routing, slot_values
             )
         projected = self.output(retrieved.to(activity.dtype))
-        return (self.retrieval_scale * projected).to(activity.dtype)
+        drive = (self.retrieval_scale * projected).to(activity.dtype)
+        if not enabled:
+            drive = torch.zeros_like(drive)
+        if trace is not None:
+            trace.record("retrieval_drive", drive)
+        return drive
 
     def associations(
         self, activity: torch.Tensor
@@ -387,12 +410,22 @@ class ChuaYangHebbianFieldAttention(nn.Module):
         )
 
     def retrieve(
-        self, activity: torch.Tensor, state: AssociativeFieldState
+        self,
+        activity: torch.Tensor,
+        state: AssociativeFieldState,
+        *,
+        enabled: bool = True,
+        trace: AblationTrace | None = None,
     ) -> torch.Tensor:
         """Query each cell's current propagated associative memory."""
         retrieved = self.memory.read(state, self.query(activity))
         projected = self.output(retrieved.to(activity.dtype))
-        return (self.retrieval_scale * projected).to(activity.dtype)
+        drive = (self.retrieval_scale * projected).to(activity.dtype)
+        if not enabled:
+            drive = torch.zeros_like(drive)
+        if trace is not None:
+            trace.record("retrieval_drive", drive)
+        return drive
 
     def associations(
         self, activity: torch.Tensor
@@ -418,29 +451,63 @@ class ChuaYangHebbianFieldAttention(nn.Module):
         )
 
     def begin_block(
-        self, state: AssociativeFieldState
+        self,
+        state: AssociativeFieldState,
+        *,
+        carry_enabled: bool = True,
+        trace: AblationTrace | None = None,
     ) -> AssociativeFieldState:
         """Reduce the preceding block to a causal boundary for the next.
 
         This operation happens only between completed blocks. Current-block
         future cells therefore never feed back into their own prefix.
         """
-        return self.carry(state)
+        carried = self.carry(state) if carry_enabled else state.reset()
+        if trace is not None:
+            trace.record("block_input_memory", carried.memory)
+            trace.record("block_input_normalizer", carried.normalizer)
+        return carried
 
     def advance(
         self,
         state: AssociativeFieldState,
         activity: torch.Tensor,
         mask: torch.Tensor | None = None,
+        *,
+        write_enabled: bool = True,
+        diffusion_enabled: bool = True,
+        trace: AblationTrace | None = None,
     ) -> AssociativeFieldState:
         """Propagate the field, then make one gated local Delta-Hebb write."""
-        propagated = self.propagate(state)
-        key, value, rate, retention = self.associations(activity)
-        return self.memory.write(
-            propagated,
-            key,
-            value,
-            learning_rate=rate,
-            retention=retention,
-            mask=mask,
-        )
+        propagated = self.propagate(state) if diffusion_enabled else state
+        if trace is not None:
+            trace.record_delta(
+                "diffusion_memory_delta", state.memory, propagated.memory
+            )
+            trace.record_delta(
+                "diffusion_normalizer_delta",
+                state.normalizer,
+                propagated.normalizer,
+            )
+        if write_enabled:
+            key, value, rate, retention = self.associations(activity)
+            written = self.memory.write(
+                propagated,
+                key,
+                value,
+                learning_rate=rate,
+                retention=retention,
+                mask=mask,
+            )
+        else:
+            written = propagated
+        if trace is not None:
+            trace.record_delta(
+                "write_memory_delta", propagated.memory, written.memory
+            )
+            trace.record_delta(
+                "write_normalizer_delta",
+                propagated.normalizer,
+                written.normalizer,
+            )
+        return written

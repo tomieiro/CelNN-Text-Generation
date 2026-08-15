@@ -8,6 +8,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from celllm.ablation import (
+    NORMAL_ABLATION,
+    AblationConfig,
+    AblationTrace,
+)
 from celllm.cell import (
     CYHFACelNNCell,
     CelNNCell,
@@ -157,16 +162,25 @@ class HebbianAttentionCelNNLanguageModel(nn.Module):
         *,
         update_memory: bool = True,
         write_mask: torch.Tensor | None = None,
+        ablation: AblationConfig = NORMAL_ABLATION,
+        trace: AblationTrace | None = None,
     ):
         """Return logits and next explicit key--value memory."""
+        ablation.validate(is_field=False)
         if memory_state is None:
             memory_state = self.new_memory_state(tokens.shape[0])
+        if not ablation.carry_enabled:
+            memory_state = memory_state.reset()
         embedding = self.embed(tokens)
         cell_input = self.cell.control_input(embedding)
         state = torch.zeros_like(embedding)
         for _ in range(self.cfg.k):
             state = self.cell.step_with_memory(
-                state, cell_input, memory_state
+                state,
+                cell_input,
+                memory_state,
+                retrieval_enabled=ablation.retrieval_enabled,
+                trace=trace,
             )
         next_memory = (
             self.cell.observe(memory_state, state, mask=write_mask)
@@ -230,18 +244,38 @@ class StateMatchedBankCelNNLanguageModel(nn.Module):
         *,
         update_memory: bool = True,
         write_mask: torch.Tensor | None = None,
+        ablation: AblationConfig = NORMAL_ABLATION,
+        trace: AblationTrace | None = None,
     ):
+        ablation.validate(is_field=False)
         if memory_state is None:
             memory_state = self.new_memory_state(tokens.shape[0])
+        if not ablation.carry_enabled:
+            memory_state = memory_state.reset()
+        if trace is not None:
+            trace.record("block_input_memory", memory_state.memory)
+            trace.record(
+                "block_input_normalizer", memory_state.normalizer
+            )
         embedding = self.embed(tokens)
         cell_input = self.cell.control_input(embedding)
         state = torch.zeros_like(embedding)
         for _ in range(self.cfg.k):
             state = self.cell.step_with_memory(
-                state, cell_input, memory_state
+                state,
+                cell_input,
+                memory_state,
+                retrieval_enabled=ablation.retrieval_enabled,
+                trace=trace,
             )
         next_memory = (
-            self.cell.observe(memory_state, state, mask=write_mask)
+            self.cell.observe(
+                memory_state,
+                state,
+                mask=write_mask,
+                write_enabled=ablation.write_enabled,
+                trace=trace,
+            )
             if update_memory
             else memory_state
         )
@@ -319,21 +353,32 @@ class CYHFACelNNLanguageModel(nn.Module):
         *,
         update_memory: bool = True,
         write_mask: torch.Tensor | None = None,
+        ablation: AblationConfig = NORMAL_ABLATION,
+        trace: AblationTrace | None = None,
     ):
         """Refine neural and memory fields, returning explicit session state."""
+        ablation.validate(is_field=True)
         tokens, write_mask, length = self._pad_block(tokens, write_mask)
         if field_state is None:
             field_state = self.new_field_state(tokens.shape[0])
         embedding = self.embed(tokens)
         cell_input = self.cell.control_input(embedding)
         state = torch.zeros_like(embedding)
-        working_field = self.cell.attention.begin_block(field_state)
+        working_field = self.cell.attention.begin_block(
+            field_state,
+            carry_enabled=ablation.carry_enabled,
+            trace=trace,
+        )
         for _ in range(self.cfg.k):
             state, working_field = self.cell.step_with_field(
                 state,
                 cell_input,
                 working_field,
                 write_mask=write_mask,
+                retrieval_enabled=ablation.retrieval_enabled,
+                write_enabled=ablation.write_enabled,
+                diffusion_enabled=ablation.diffusion_enabled,
+                trace=trace,
             )
         next_field = working_field if update_memory else field_state
         return self.readout(state[:, :length]), next_field

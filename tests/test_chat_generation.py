@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import torch
 
+from celllm.ablation import AblationCondition, AblationConfig
 from celllm.chat_generation import ChatSession, SamplingConfig, sample_token
 from celllm.chat_model import CellLMChatModel
 from celllm.chat_tokenizer import ChatTokenizer
-from celllm.config import ModelConfig, PlasticityConfig
+from celllm.config import ModelConfig, PlasticityConfig, StateMatchedBankConfig
 
 
 def tokenizer():
@@ -69,3 +70,30 @@ def test_stochastic_sampling_is_repeatable_with_a_generator():
     ) == sample_token(
         logits, config, generated=[], forbidden=set(), generator=second
     )
+
+
+def test_session_applies_associative_ablation_during_generation():
+    chat_tokenizer = tokenizer()
+    chat_model = CellLMChatModel(
+        ModelConfig(
+            n=8,
+            d=4,
+            r=1,
+            k=7,
+            vocab_size=chat_tokenizer.vocab_size,
+        ),
+        bank=StateMatchedBankConfig(
+            slots=8,
+            key_size=4,
+            value_size=4,
+            chunk_size=8,
+        ),
+    )
+    session = ChatSession(
+        chat_model,
+        chat_tokenizer,
+        sampling=SamplingConfig(max_new_tokens=2, temperature=0),
+        ablation=AblationConfig(AblationCondition.NO_RETRIEVAL),
+    )
+
+    assert isinstance(session.reply("hello how are you coffee"), str)
