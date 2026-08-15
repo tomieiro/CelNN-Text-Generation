@@ -4,9 +4,10 @@ CY-HFA is the primary associative mechanism of the chat CellLM. Attention is
 not represented by an `N x N` score matrix. It is a normalized key--value
 memory field that evolves locally together with the Chua--Yang neural field.
 
-The previous `DeltaHebbianAttention` remains available as the global-memory
-baseline. It owns one matrix per conversation and writes only after a complete
-block. It is useful experimentally, but it is not CY-HFA.
+Two controls remain available. `DeltaHebbianAttention` is the small global
+memory baseline. `StateMatchedGlobalBankAttention` owns the same number of
+dynamic scalars and trainable parameters as radius-one CY-HFA, but has no
+spatial topology. Both write only after a complete block.
 
 ## State and equations
 
@@ -59,6 +60,12 @@ from earlier positions. Its query retrieves only content compatible with that
 cell's key features. Relevance consequently depends on content, lattice
 topology, relaxation depth, coupling strength, and fast-memory history.
 
+For the A100 configuration, this transport is intentionally local. An impulse
+written at cell 0 after the first propagation reaches at most cell 14 after 15
+refinements, never terminal cell 15. Its cell-14 magnitude is `1e-14` for
+`D=0.10` and `3.73e-9` for `D=0.25`. The implementation therefore does not use
+the terminal cell as a whole-block summary.
+
 ## Normalized Delta-Hebbian write
 
 Two learned gates determine the local write rate and retention:
@@ -104,10 +111,27 @@ architectural distinction behind CY-HFA.
   transient memories.
 - During generation, an incomplete block evolves a speculative field for its
   logits but does not commit it. A completed block is committed once.
-- At a block boundary, the preceding block's terminal cell is broadcast as the
-  past-only boundary field. This gives every new position access to accumulated
-  history without wrapping current future cells back into the prefix.
+- At a block boundary, `M_i` and `s_i` from all completed cells are averaged
+  with identical non-negative weights. This normalized past-only boundary is
+  broadcast into the next lattice. Long-range carry is therefore separate
+  from deliberately local intra-block diffusion.
 - Writes are differentiable by default. `--detach-memory` is an ablation.
+
+## Mixed precision
+
+The neural state, Q/K/V projections, and other slow computation can use BF16.
+The recurrent associative state always uses FP32:
+
+```text
+M, s                         FP32
+phi(q), phi(k) for memory    cast to FP32
+numerator and denominator    FP32 accumulation
+Delta-Hebbian correction     FP32
+retrieved neural drive       cast back to the activity dtype
+```
+
+The memory primitive explicitly disables autocast during reads and writes, so
+this contract remains true inside the notebook's BF16 autocast region.
 
 ## Modularity
 
@@ -118,7 +142,9 @@ libPyCelNN
 
 CellLM
   CausalFieldPropagation            causal topology and diffusion
+  InterBlockFieldCarry              topology-free normalized block boundary
   ChuaYangHebbianFieldAttention     projections, gates, propagation, read/write
+  StateMatchedGlobalBankAttention   equal-state non-spatial baseline
   CYHFACelNNCell                    coupled (x, M, s) refinement
   CYHFACelNNLanguageModel           fixed lattice blocks and session state
   CellLMChatModel / ChatSession     training and conversation lifecycle
@@ -129,12 +155,23 @@ propagator accepts arbitrary trailing feature axes, so the same operator is
 used for numerator matrices and normalizer vectors. The global Delta-Hebb and
 legacy Oja implementations remain loadable as controlled baselines.
 
+## State-matched baseline
+
+The global bank uses `n` normalized memory slots and fixed deterministic slot
+addresses. Queries read all slots; completed-block keys route writes by
+content. It has no neighbour relation or diffusion. With radius one, its two
+learned routing temperatures replace the field's two diffusion parameters, so
+CY-HFA and the bank have equal trainable parameter counts as well as equal
+recurrent-state sizes. The small one-matrix global baseline remains available
+as a capacity-unmatched reference.
+
 ## Cost and hardware boundary
 
 For lattice width `n`, key width `r`, and value width `v`, one conversation
 uses `n * (v*r + r)` dynamic scalars. With the A100 configuration
-`n=16, r=v=32`, that is 16,896 scalars: about 33 KiB in FP16. The state is
-independent of total conversation length and no `QK^T` matrix is materialized.
+`n=16, r=v=32`, that is 16,896 scalars: about 66 KiB in FP32, or 8.25 MiB for
+batch 128. The state is independent of total conversation length and no token
+`QK^T` matrix is materialized.
 
 The mechanism uses local stencil reads, outer products, elementwise gates,
 positive feature maps, and divisions. This provides a clear FPGA mapping

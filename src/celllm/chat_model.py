@@ -11,11 +11,13 @@ from celllm.config import (
     HebbianAttentionConfig,
     ModelConfig,
     PlasticityConfig,
+    StateMatchedBankConfig,
 )
 from celllm.model import (
     CYHFACelNNLanguageModel,
     HebbianAttentionCelNNLanguageModel,
     PlasticCelNNLanguageModel,
+    StateMatchedBankCelNNLanguageModel,
 )
 
 
@@ -28,27 +30,36 @@ class CellLMChatModel(nn.Module):
         plasticity: PlasticityConfig | None = None,
         *,
         memory: HebbianAttentionConfig | None = None,
+        bank: StateMatchedBankConfig | None = None,
         field: CYHFAConfig | None = None,
     ) -> None:
         super().__init__()
         selected = sum(
-            option is not None for option in (plasticity, memory, field)
+            option is not None for option in (plasticity, memory, bank, field)
         )
         if selected > 1:
             raise ValueError(
-                "choose legacy plasticity, global memory, or CY-HFA"
+                "choose legacy plasticity, global memory, bank, or CY-HFA"
             )
         if plasticity is not None:
             self.core = PlasticCelNNLanguageModel(model, plasticity)
             self.memory_config = None
+            self.bank_config = None
             self.field_config = None
         elif memory is not None:
             self.core = HebbianAttentionCelNNLanguageModel(model, memory)
             self.memory_config = self.core.memory_config
+            self.bank_config = None
+            self.field_config = None
+        elif bank is not None:
+            self.core = StateMatchedBankCelNNLanguageModel(model, bank)
+            self.memory_config = None
+            self.bank_config = self.core.bank_config
             self.field_config = None
         else:
             self.core = CYHFACelNNLanguageModel(model, field)
             self.memory_config = None
+            self.bank_config = None
             self.field_config = self.core.field_config
 
     @property
@@ -65,12 +76,20 @@ class CellLMChatModel(nn.Module):
 
     @property
     def uses_associative_state(self) -> bool:
-        return self.memory_config is not None or self.field_config is not None
+        return any(
+            config is not None
+            for config in (
+                self.memory_config,
+                self.bank_config,
+                self.field_config,
+            )
+        )
 
     @property
     def chunk_size(self) -> int:
         config = (
             self.field_config
+            or self.bank_config
             or self.memory_config
             or self.core.plasticity_config
         )
@@ -91,6 +110,8 @@ class CellLMChatModel(nn.Module):
     def new_plastic_state(self, batch_size: int):
         if self.field_config is not None:
             return self.core.new_field_state(batch_size)
+        if self.bank_config is not None:
+            return self.core.new_memory_state(batch_size)
         if self.memory_config is None:
             return self.core.new_plastic_state(batch_size)
         return self.core.new_memory_state(batch_size)

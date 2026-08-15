@@ -8,9 +8,11 @@ from celnn import AssociativeFieldState
 from celllm.attention import (
     CausalFieldPropagation,
     ChuaYangHebbianFieldAttention,
+    InterBlockFieldCarry,
 )
 from celllm.chat_model import CellLMChatModel
 from celllm.config import CYHFAConfig, ModelConfig
+from celllm.field_diagnostics import furthest_reached, impulse_trajectory
 
 
 def field_config(**overrides):
@@ -56,6 +58,22 @@ def test_empty_field_retrieval_is_zero_and_non_mutating():
     assert state.updates == 0
 
 
+def test_associative_accumulators_remain_fp32_under_bf16_autocast():
+    attention = ChuaYangHebbianFieldAttention(8, field_config())
+    state = attention.new_state(2, 4)
+    activity = torch.randn(2, 4, 8)
+
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        drive = attention.retrieve(activity, state)
+        updated = attention.advance(state, activity)
+
+    assert state.memory.dtype == torch.float32
+    assert state.normalizer.dtype == torch.float32
+    assert updated.memory.dtype == torch.float32
+    assert updated.normalizer.dtype == torch.float32
+    assert drive.dtype == activity.dtype
+
+
 def test_propagation_moves_memory_forward_but_never_backward():
     propagation = CausalFieldPropagation(
         radius=1, rate=0.2, max_rate=0.2, learnable=False
@@ -71,6 +89,21 @@ def test_propagation_moves_memory_forward_but_never_backward():
     torch.testing.assert_close(first[:, :3], second[:, :3])
     assert first[0, 3, 0] > 0
     assert first[0, 1, 0] == 0
+
+
+def test_real_write_order_cannot_reach_terminal_in_fifteen_steps():
+    propagation = CausalFieldPropagation(
+        radius=1, rate=0.1, max_rate=0.25, learnable=False
+    )
+
+    trajectory = impulse_trajectory(propagation, cells=16, steps=15)
+
+    assert trajectory.shape == (16, 16)
+    assert furthest_reached(trajectory) == 14
+    assert trajectory[-1, 15] == 0
+    torch.testing.assert_close(
+        trajectory[-1, 14], torch.tensor(0.1**14), rtol=1e-5, atol=0
+    )
 
 
 def test_memory_and_normalizer_share_the_same_cellular_propagator():
@@ -103,22 +136,37 @@ def test_memory_and_normalizer_share_the_same_cellular_propagator():
     assert torch.all(propagated.normalizer >= 0)
 
 
-def test_next_block_starts_from_previous_terminal_causal_field():
-    attention = ChuaYangHebbianFieldAttention(8, field_config())
+def test_inter_block_carry_uses_every_cell_not_only_terminal():
+    carry = InterBlockFieldCarry()
     memory = torch.randn(1, 4, 3, 4)
     normalizer = torch.rand(1, 4, 4)
     state = AssociativeFieldState(memory, normalizer, updates=3)
 
-    carried = attention.begin_block(state)
+    carried = carry(state)
+    expected_memory = memory.mean(dim=1)
+    expected_normalizer = normalizer.mean(dim=1)
 
     for position in range(4):
         torch.testing.assert_close(
-            carried.memory[:, position], memory[:, -1]
+            carried.memory[:, position], expected_memory
         )
         torch.testing.assert_close(
-            carried.normalizer[:, position], normalizer[:, -1]
+            carried.normalizer[:, position], expected_normalizer
         )
     assert carried.updates == 3
+
+
+def test_first_cell_association_survives_inter_block_carry():
+    carry = InterBlockFieldCarry()
+    memory = torch.zeros(1, 16, 1, 1)
+    normalizer = torch.zeros(1, 16, 1)
+    memory[:, 0] = 1
+    normalizer[:, 0] = 1
+
+    carried = carry(AssociativeFieldState(memory, normalizer))
+
+    assert torch.all(carried.memory > 0)
+    torch.testing.assert_close(carried.memory, carried.normalizer.unsqueeze(-2))
 
 
 def test_future_tokens_cannot_change_prefix_logits():

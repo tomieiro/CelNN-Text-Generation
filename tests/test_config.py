@@ -5,6 +5,7 @@ from celllm.config import (
     HebbianAttentionConfig,
     ModelConfig,
     PlasticityConfig,
+    StateMatchedBankConfig,
 )
 
 
@@ -57,3 +58,12 @@ def test_cy_hfa_configuration_bounds_local_field_dynamics():
         CYHFAConfig(diffusion_radius=0)
     with pytest.raises(ValueError, match="epsilon"):
         CYHFAConfig(epsilon=0)
+
+
+def test_state_matched_bank_configuration_is_validated():
+    config = StateMatchedBankConfig()
+    assert config.slots == config.chunk_size == 16
+    with pytest.raises(ValueError, match="slots"):
+        StateMatchedBankConfig(slots=0)
+    with pytest.raises(ValueError, match="temperatures"):
+        StateMatchedBankConfig(read_temperature=0)

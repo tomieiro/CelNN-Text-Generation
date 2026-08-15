@@ -10,7 +10,7 @@ This self-contained bundle trains the first small English CellLM chat model:
 - learned Q/K/V projections, write/forget gates, and causal field diffusion;
 - coupled `(x, M, s)` refinement with differentiable Delta-Hebbian writes;
 - assistant-only loss over conversations capped at 128 tokens;
-- BF16 training on CUDA;
+- BF16 neural computation with FP32 associative accumulators on CUDA;
 - rotating progress checkpoint every 250 steps;
 - validation and fixed-prompt samples every 500 steps;
 - deterministic behavioral evaluation for greeting, identity, everyday facts,
@@ -46,6 +46,22 @@ ovpn-job-submitter \
 
 Collect with `ovpn-job-submitter --collect-results <job-id>`.
 
+The state-matched control uses the same submission resources:
+
+```bash
+ovpn-job-submitter \
+  experiment-chat/experiment-chat-bank-gpu.ipynb \
+  /home/tomieiro/Desktop/SSH \
+  --include-files \
+  --partition arandu \
+  --gpus 1 \
+  --cpus 12 \
+  --time-limit 08:00:00 \
+  --async
+```
+
+It writes to `outputs/chat-bank`, separately from CY-HFA in `outputs/chat`.
+
 The collected `outputs/chat/evaluation.json` reports the overall keyword
 recall, per-category scores, every generated response, and a repeated-bigram
 rate to expose degenerate loops. It is an explicit acceptance report, not a
@@ -66,12 +82,18 @@ By default, gradients pass through Delta-Hebbian writes so the representation
 can learn to store useful key--value associations. `--detach-memory` is retained
 only as an explicit credit-assignment ablation. With 16 lattice cells and
 32-dimensional keys and values, the normalized `M_i/s_i` field contains 16,896
-scalars per conversation (about 33 KiB in FP16), independent of conversation
-length. No `QK^T` matrix is formed.
+scalars per conversation (about 66 KiB in FP32), independent of conversation
+length. At batch 128 the recurrent field occupies about 8.25 MiB. No token
+`QK^T` matrix is formed.
+
+For a controlled comparison, `--attention bank` selects a global bank with the
+same 16,896 recurrent scalars and the same trainable parameter count. Its slots
+are routed by content but have no lattice neighbourhood or diffusion.
 
 To resume a timed-out run, copy `progress.pt` and `tokenizer.json` into
 `experiment-chat/resume/` before resubmitting. The notebook stages them into
 the durable output mount and continues from the saved optimizer step. Only
 resume `celllm-chat-cy-hfa` checkpoints for the default `--attention field`
 run. Global Delta-Hebb checkpoints require `--attention global`; the Oja
-checkpoints from jobs 11832 and 11833 are intentionally rejected.
+checkpoints from jobs 11832 and 11833 are intentionally rejected. State-matched
+bank checkpoints require `--attention bank`.

@@ -21,7 +21,12 @@ from celllm.chat_generation import ChatSession, SamplingConfig
 from celllm.chat_evaluation import evaluate_simple_chat
 from celllm.chat_model import CellLMChatModel
 from celllm.chat_tokenizer import ChatTokenizer
-from celllm.config import CYHFAConfig, HebbianAttentionConfig, ModelConfig
+from celllm.config import (
+    CYHFAConfig,
+    HebbianAttentionConfig,
+    ModelConfig,
+    StateMatchedBankConfig,
+)
 
 SAMPLE_PROMPTS = (
     "hello",
@@ -54,9 +59,11 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--vocab-size", type=int, default=1_024)
     parser.add_argument(
         "--attention",
-        choices=("field", "global"),
+        choices=("field", "global", "bank"),
         default="field",
-        help="CY-HFA field (primary) or global Delta-Hebb baseline",
+        help=(
+            "CY-HFA field, small global Delta-Hebb, or state-matched bank"
+        ),
     )
     parser.add_argument("--memory-size", type=int, default=32)
     parser.add_argument("--hebb-rate", type=float, default=0.1)
@@ -177,10 +184,18 @@ def main() -> None:
             raise ValueError(
                 "cannot resume a legacy Oja checkpoint into associative attention"
             )
-        if args.attention == "field" and model.field_config is None:
-            raise ValueError("resume checkpoint uses global attention, not CY-HFA")
-        if args.attention == "global" and model.memory_config is None:
-            raise ValueError("resume checkpoint uses CY-HFA, not global attention")
+        resumed_attention = (
+            "field"
+            if model.field_config is not None
+            else "bank"
+            if model.bank_config is not None
+            else "global"
+        )
+        if args.attention != resumed_attention:
+            raise ValueError(
+                f"resume checkpoint uses {resumed_attention} attention, "
+                f"not {args.attention}"
+            )
         start_step = int(checkpoint["step"])
     else:
         tokenizer = ChatTokenizer.train(
@@ -213,7 +228,7 @@ def main() -> None:
                 chunk_size=args.context,
             )
             model = CellLMChatModel(model_config, field=field)
-        else:
+        elif args.attention == "global":
             memory = HebbianAttentionConfig(
                 key_size=args.memory_size,
                 value_size=args.memory_size,
@@ -224,6 +239,18 @@ def main() -> None:
                 chunk_size=args.context,
             )
             model = CellLMChatModel(model_config, memory=memory)
+        else:
+            bank = StateMatchedBankConfig(
+                slots=args.context,
+                key_size=args.memory_size,
+                value_size=args.memory_size,
+                learning_rate=args.hebb_rate,
+                min_retention=args.min_retention,
+                retrieval_scale=args.retrieval_scale,
+                detach_updates=args.detach_memory,
+                chunk_size=args.context,
+            )
+            model = CellLMChatModel(model_config, bank=bank)
         model.to(args.device)
         checkpoint = {}
         start_step = 0
@@ -293,7 +320,11 @@ def main() -> None:
             metrics = {
                 "step": current,
                 "attention": (
-                    "cy-hfa" if model.field_config is not None else "global"
+                    "cy-hfa"
+                    if model.field_config is not None
+                    else "state-matched-bank"
+                    if model.bank_config is not None
+                    else "global"
                 ),
                 "train_loss": loss.item(),
                 "valid_loss": validation,

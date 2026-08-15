@@ -13,12 +13,14 @@ from celllm.cell import (
     CelNNCell,
     HebbianAttentionCelNNCell,
     PlasticCelNNCell,
+    StateMatchedBankCelNNCell,
 )
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
     ModelConfig,
     PlasticityConfig,
+    StateMatchedBankConfig,
 )
 
 
@@ -179,6 +181,78 @@ class HebbianAttentionCelNNLanguageModel(nn.Module):
 
     def loss(self, tokens: torch.Tensor) -> torch.Tensor:
         chunks = tokens.split(self.memory_config.chunk_size, dim=1)
+        memory = self.new_memory_state(tokens.shape[0])
+        logits = []
+        for chunk in chunks:
+            chunk_logits, memory = self.forward_with_state(chunk, memory)
+            logits.append(chunk_logits)
+        joined = torch.cat(logits, dim=1)
+        return F.cross_entropy(
+            joined[:, :-1].reshape(-1, self.cfg.vocab_size),
+            tokens[:, 1:].reshape(-1),
+        )
+
+
+class StateMatchedBankCelNNLanguageModel(nn.Module):
+    """CelNN control with a global bank matching CY-HFA recurrent state."""
+
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        bank: StateMatchedBankConfig | None = None,
+    ) -> None:
+        super().__init__()
+        self.cfg = replace(cfg, mixer="dense")
+        self.bank_config = bank or StateMatchedBankConfig(
+            slots=self.cfg.n,
+            key_size=max(32, self.cfg.n),
+            chunk_size=self.cfg.n,
+        )
+        if self.bank_config.slots != self.cfg.n:
+            raise ValueError("state-matched bank slots must equal lattice size")
+        self.embed = nn.Embedding(self.cfg.vocab_size, self.cfg.d)
+        self.cell = StateMatchedBankCelNNCell(
+            self.cfg, self.bank_config, causal=True
+        )
+        self.readout = nn.Linear(
+            self.cfg.d, self.cfg.vocab_size, bias=True
+        )
+        self.readout.weight = self.embed.weight
+        nn.init.normal_(self.embed.weight, std=0.02)
+
+    def new_memory_state(self, batch_size: int):
+        return self.cell.new_memory_state(batch_size)
+
+    def forward_with_state(
+        self,
+        tokens: torch.Tensor,
+        memory_state=None,
+        *,
+        update_memory: bool = True,
+        write_mask: torch.Tensor | None = None,
+    ):
+        if memory_state is None:
+            memory_state = self.new_memory_state(tokens.shape[0])
+        embedding = self.embed(tokens)
+        cell_input = self.cell.control_input(embedding)
+        state = torch.zeros_like(embedding)
+        for _ in range(self.cfg.k):
+            state = self.cell.step_with_memory(
+                state, cell_input, memory_state
+            )
+        next_memory = (
+            self.cell.observe(memory_state, state, mask=write_mask)
+            if update_memory
+            else memory_state
+        )
+        return self.readout(state), next_memory
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        logits, _ = self.forward_with_state(tokens)
+        return logits
+
+    def loss(self, tokens: torch.Tensor) -> torch.Tensor:
+        chunks = tokens.split(self.bank_config.chunk_size, dim=1)
         memory = self.new_memory_state(tokens.shape[0])
         logits = []
         for chunk in chunks:

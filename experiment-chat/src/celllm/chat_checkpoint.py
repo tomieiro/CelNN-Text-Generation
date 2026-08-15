@@ -13,6 +13,7 @@ from celllm.config import (
     HebbianAttentionConfig,
     ModelConfig,
     PlasticityConfig,
+    StateMatchedBankConfig,
 )
 
 
@@ -29,11 +30,16 @@ def save_chat_checkpoint(
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     is_field = model.field_config is not None
+    is_bank = model.bank_config is not None
     is_global = model.memory_config is not None
     if is_field:
         configuration = {"field_config": asdict(model.field_config)}
         format_version = 3
         architecture = "celllm-chat-cy-hfa"
+    elif is_bank:
+        configuration = {"bank_config": asdict(model.bank_config)}
+        format_version = 4
+        architecture = "celllm-chat-delta-hebb-bank"
     elif is_global:
         configuration = {"memory_config": asdict(model.memory_config)}
         format_version = 2
@@ -67,10 +73,16 @@ def load_chat_checkpoint(
     if architecture not in {
         "celllm-chat",
         "celllm-chat-delta-hebb",
+        "celllm-chat-delta-hebb-bank",
         "celllm-chat-cy-hfa",
     }:
         raise ValueError("checkpoint is not a CellLM chat model")
-    if architecture == "celllm-chat-cy-hfa":
+    if architecture == "celllm-chat-delta-hebb-bank":
+        model = CellLMChatModel(
+            ModelConfig(**checkpoint["model_config"]),
+            bank=StateMatchedBankConfig(**checkpoint["bank_config"]),
+        )
+    elif architecture == "celllm-chat-cy-hfa":
         model = CellLMChatModel(
             ModelConfig(**checkpoint["model_config"]),
             field=CYHFAConfig(**checkpoint["field_config"]),

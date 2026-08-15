@@ -13,7 +13,11 @@ from celnn import (
 )
 from torch import nn
 
-from celllm.config import CYHFAConfig, HebbianAttentionConfig
+from celllm.config import (
+    CYHFAConfig,
+    HebbianAttentionConfig,
+    StateMatchedBankConfig,
+)
 
 
 class DeltaHebbianAttention(nn.Module):
@@ -101,6 +105,155 @@ class DeltaHebbianAttention(nn.Module):
         return next_state
 
 
+class StateMatchedGlobalBankAttention(nn.Module):
+    """Fixed-size global memory bank without cellular spatial propagation.
+
+    The bank owns the same ``slots * (value * key + key)`` recurrent scalars
+    as an equally sized CY-HFA field. Fixed deterministic slot addresses avoid
+    trainable parameter inflation; two learned routing temperatures match the
+    two radius-one diffusion parameters used by CY-HFA.
+    """
+
+    def __init__(
+        self, dimensions: int, config: StateMatchedBankConfig
+    ) -> None:
+        super().__init__()
+        self.dimensions = int(dimensions)
+        self.config = config
+        self.query = nn.Linear(dimensions, config.key_size, bias=False)
+        self.key = nn.Linear(dimensions, config.key_size, bias=False)
+        self.value = nn.Linear(dimensions, config.value_size, bias=False)
+        self.output = nn.Linear(config.value_size, dimensions, bias=False)
+        self.write_controls = nn.Linear(dimensions, 2)
+        nn.init.zeros_(self.write_controls.weight)
+        with torch.no_grad():
+            self.write_controls.bias.copy_(torch.tensor([-1.0, 2.0]))
+
+        scale = torch.tensor(float(config.retrieval_scale))
+        if config.learnable_retrieval_scale:
+            self.retrieval_scale = nn.Parameter(scale)
+        else:
+            self.register_buffer("retrieval_scale", scale)
+        self.raw_read_temperature = nn.Parameter(
+            torch.tensor(math.log(config.read_temperature))
+        )
+        self.raw_write_temperature = nn.Parameter(
+            torch.tensor(math.log(config.write_temperature))
+        )
+        positions = torch.arange(config.slots, dtype=torch.float32)[:, None]
+        frequencies = torch.arange(config.key_size, dtype=torch.float32)[None]
+        addresses = torch.cos(
+            math.pi
+            * (positions + 0.5)
+            * frequencies
+            / float(config.slots)
+        )
+        addresses = torch.nn.functional.normalize(addresses, dim=-1)
+        self.register_buffer("slot_addresses", addresses)
+        self.memory = NormalizedDeltaHebbianField(
+            config.key_size,
+            config.value_size,
+            learning_rate=config.learning_rate,
+            retention=config.min_retention,
+            epsilon=config.epsilon,
+            detach_updates=config.detach_updates,
+            memory_limit=config.memory_limit,
+        )
+
+    @property
+    def read_temperature(self) -> torch.Tensor:
+        return self.raw_read_temperature.exp()
+
+    @property
+    def write_temperature(self) -> torch.Tensor:
+        return self.raw_write_temperature.exp()
+
+    def new_state(self, batch_size: int) -> AssociativeFieldState:
+        return self.memory.new_state(
+            batch_size,
+            self.config.slots,
+            like=self.query.weight,
+            dtype=torch.float32,
+        )
+
+    def _routing(
+        self, projected: torch.Tensor, temperature: torch.Tensor
+    ) -> torch.Tensor:
+        with torch.autocast(
+            device_type=projected.device.type, enabled=False
+        ):
+            scores = torch.einsum(
+                "b...k,sk->b...s",
+                projected.float(),
+                self.slot_addresses.float(),
+            )
+            return torch.softmax(scores / temperature.float(), dim=-1)
+
+    def retrieve(
+        self, activity: torch.Tensor, state: AssociativeFieldState
+    ) -> torch.Tensor:
+        """Read all past-only slots and route each query without topology."""
+        query = self.query(activity)
+        slot_values = self.memory.read_all(state, query)
+        routing = self._routing(query, self.read_temperature)
+        with torch.autocast(
+            device_type=activity.device.type, enabled=False
+        ):
+            retrieved = torch.einsum(
+                "b...s,b...sv->b...v", routing, slot_values
+            )
+        projected = self.output(retrieved.to(activity.dtype))
+        return (self.retrieval_scale * projected).to(activity.dtype)
+
+    def associations(
+        self, activity: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        key = self.key(activity)
+        value = torch.tanh(self.value(activity))
+        controls = torch.sigmoid(self.write_controls(activity))
+        rate = self.config.learning_rate * controls[..., 0]
+        retention = self.config.min_retention + (
+            1.0 - self.config.min_retention
+        ) * controls[..., 1]
+        return key, value, rate, retention
+
+    def write(
+        self,
+        state: AssociativeFieldState,
+        activity: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> AssociativeFieldState:
+        """Route completed-block associations into independent global slots."""
+        if activity.ndim != 3:
+            raise ValueError("activity must have shape (batch, sequence, features)")
+        if mask is not None and mask.shape != activity.shape[:2]:
+            raise ValueError("write mask must match batch and sequence axes")
+        keys, values, rates, retentions = self.associations(activity)
+        routing = self._routing(keys, self.write_temperature)
+        next_state = state
+        slots = self.config.slots
+        for index in range(activity.shape[1]):
+            assignment = routing[:, index]
+            rate = rates[:, index, None].float() * assignment
+            retention = 1.0 - assignment * (
+                1.0 - retentions[:, index, None].float()
+            )
+            if mask is not None:
+                active = mask[:, index, None].to(rate.dtype)
+                rate = rate * active
+                retention = retention * active + (1.0 - active)
+            key = keys[:, index, None].expand(-1, slots, -1)
+            value = values[:, index, None].expand(-1, slots, -1)
+            next_state = self.memory.write(
+                next_state,
+                key,
+                value,
+                learning_rate=rate,
+                retention=retention,
+            )
+        return next_state
+
+
 class CausalFieldPropagation(nn.Module):
     """Diffuse a field only from preceding cells with a stable convex step.
 
@@ -160,6 +313,27 @@ class CausalFieldPropagation(nn.Module):
         return propagated
 
 
+class InterBlockFieldCarry(nn.Module):
+    """Reduce a completed local field to a past-only block boundary.
+
+    Numerator and normalizer are averaged with identical non-negative weights.
+    Broadcasting that boundary into the next lattice separates long-range
+    block transport from deliberately local intra-block diffusion without
+    adding recurrent state.
+    """
+
+    def forward(
+        self, state: AssociativeFieldState
+    ) -> AssociativeFieldState:
+        memory = state.memory.mean(dim=1, keepdim=True)
+        normalizer = state.normalizer.mean(dim=1, keepdim=True)
+        return AssociativeFieldState(
+            memory.expand_as(state.memory),
+            normalizer.expand_as(state.normalizer),
+            state.updates,
+        )
+
+
 class ChuaYangHebbianFieldAttention(nn.Module):
     """Normalized associative attention whose memory is a cellular field.
 
@@ -192,6 +366,7 @@ class ChuaYangHebbianFieldAttention(nn.Module):
             max_rate=config.max_diffusion,
             learnable=config.learnable_diffusion,
         )
+        self.carry = InterBlockFieldCarry()
         self.memory = NormalizedDeltaHebbianField(
             config.key_size,
             config.value_size,
@@ -203,9 +378,12 @@ class ChuaYangHebbianFieldAttention(nn.Module):
         )
 
     def new_state(self, batch_size: int, cells: int) -> AssociativeFieldState:
-        """Create empty local memories on the projection parameter device."""
+        """Create FP32 accumulators on the projection parameter device."""
         return self.memory.new_state(
-            batch_size, cells, like=self.query.weight
+            batch_size,
+            cells,
+            like=self.query.weight,
+            dtype=torch.float32,
         )
 
     def retrieve(
@@ -213,7 +391,8 @@ class ChuaYangHebbianFieldAttention(nn.Module):
     ) -> torch.Tensor:
         """Query each cell's current propagated associative memory."""
         retrieved = self.memory.read(state, self.query(activity))
-        return self.retrieval_scale * self.output(retrieved)
+        projected = self.output(retrieved.to(activity.dtype))
+        return (self.retrieval_scale * projected).to(activity.dtype)
 
     def associations(
         self, activity: torch.Tensor
@@ -238,19 +417,15 @@ class ChuaYangHebbianFieldAttention(nn.Module):
             state.updates,
         )
 
-    @staticmethod
     def begin_block(
-        state: AssociativeFieldState,
+        self, state: AssociativeFieldState
     ) -> AssociativeFieldState:
-        """Use the preceding block's terminal field as causal boundary.
+        """Reduce the preceding block to a causal boundary for the next.
 
-        The final cell is the only cell downstream of the full causal lattice.
-        Broadcasting it initializes every position of the next block with
-        past-only information before current-token writes begin.
+        This operation happens only between completed blocks. Current-block
+        future cells therefore never feed back into their own prefix.
         """
-        memory = state.memory[:, -1:].expand_as(state.memory)
-        normalizer = state.normalizer[:, -1:].expand_as(state.normalizer)
-        return AssociativeFieldState(memory, normalizer, state.updates)
+        return self.carry(state)
 
     def advance(
         self,

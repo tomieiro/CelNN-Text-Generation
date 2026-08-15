@@ -110,6 +110,45 @@ class HebbianAttentionConfig:
 
 
 @dataclass(frozen=True)
+class StateMatchedBankConfig:
+    """Global normalized memory-bank baseline matched to CY-HFA state."""
+
+    slots: int = 16
+    key_size: int = 32
+    value_size: int = 32
+    learning_rate: float = 0.1
+    min_retention: float = 0.99
+    read_temperature: float = 1.0
+    write_temperature: float = 1.0
+    retrieval_scale: float = 0.1
+    learnable_retrieval_scale: bool = True
+    detach_updates: bool = False
+    memory_limit: float | None = 1.0
+    epsilon: float = 1e-6
+    chunk_size: int = 16
+
+    def __post_init__(self) -> None:
+        if self.slots < 1:
+            raise ValueError("bank slots must be positive")
+        if self.key_size < 1 or self.value_size < 1:
+            raise ValueError("bank key and value sizes must be positive")
+        if self.learning_rate < 0:
+            raise ValueError("bank learning rate must be non-negative")
+        if not 0 <= self.min_retention <= 1:
+            raise ValueError("minimum retention must be between zero and one")
+        if self.read_temperature <= 0 or self.write_temperature <= 0:
+            raise ValueError("bank temperatures must be positive")
+        if self.retrieval_scale < 0:
+            raise ValueError("retrieval scale must be non-negative")
+        if self.memory_limit is not None and self.memory_limit <= 0:
+            raise ValueError("memory limit must be positive or None")
+        if self.epsilon <= 0:
+            raise ValueError("epsilon must be positive")
+        if self.chunk_size < 1:
+            raise ValueError("chunk_size must be positive")
+
+
+@dataclass(frozen=True)
 class CYHFAConfig:
     """Chua--Yang Hebbian Field Attention settings.
 

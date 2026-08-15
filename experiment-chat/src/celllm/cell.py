@@ -12,8 +12,13 @@ from celllm.config import ModelConfig, PlasticityConfig
 from celllm.attention import (
     ChuaYangHebbianFieldAttention,
     DeltaHebbianAttention,
+    StateMatchedGlobalBankAttention,
 )
-from celllm.config import CYHFAConfig, HebbianAttentionConfig
+from celllm.config import (
+    CYHFAConfig,
+    HebbianAttentionConfig,
+    StateMatchedBankConfig,
+)
 from celllm.mixers import PlasticDenseMixer, build_mixer
 
 
@@ -114,6 +119,38 @@ class HebbianAttentionCelNNCell(CelNNCell):
 
     def observe(self, memory_state, activity: torch.Tensor, mask=None):
         """Write bounded outputs only after a causal block is complete."""
+        return self.attention.write(
+            memory_state, piecewise_linear(activity), mask=mask
+        )
+
+
+class StateMatchedBankCelNNCell(CelNNCell):
+    """CelNN dynamics reading a state-matched non-spatial global bank."""
+
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        bank: StateMatchedBankConfig,
+        causal: bool = True,
+    ) -> None:
+        super().__init__(cfg, causal=causal)
+        self.attention = StateMatchedGlobalBankAttention(cfg.d, bank)
+
+    def new_memory_state(self, batch_size: int):
+        return self.attention.new_state(batch_size)
+
+    def step_with_memory(
+        self, x: torch.Tensor, cell_input: torch.Tensor, memory_state
+    ) -> torch.Tensor:
+        output = piecewise_linear(x)
+        memory_drive = self.attention.retrieve(output, memory_state)
+        return self.dynamics.step(
+            x,
+            cell_input,
+            extra_drive=self.mixer(x) + memory_drive,
+        )
+
+    def observe(self, memory_state, activity: torch.Tensor, mask=None):
         return self.attention.write(
             memory_state, piecewise_linear(activity), mask=mask
         )

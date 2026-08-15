@@ -6,12 +6,15 @@ from celllm.attention import (
     CausalFieldPropagation,
     ChuaYangHebbianFieldAttention,
     DeltaHebbianAttention,
+    InterBlockFieldCarry,
+    StateMatchedGlobalBankAttention,
 )
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
     ModelConfig,
     PlasticityConfig,
+    StateMatchedBankConfig,
     TrainConfig,
 )
 from celllm.controls import GatedConvLM
@@ -20,6 +23,7 @@ from celllm.model import (
     CelNNLanguageModel,
     HebbianAttentionCelNNLanguageModel,
     PlasticCelNNLanguageModel,
+    StateMatchedBankCelNNLanguageModel,
 )
 from celllm.plastic_checkpoint import (
     load_plastic_checkpoint,
@@ -46,9 +50,13 @@ __all__ = [
     "HebbianAttentionCelNNLanguageModel",
     "HebbianAttentionConfig",
     "ChuaYangHebbianFieldAttention",
+    "InterBlockFieldCarry",
     "ModelConfig",
     "PlasticCelNNLanguageModel",
     "PlasticityConfig",
+    "StateMatchedBankCelNNLanguageModel",
+    "StateMatchedBankConfig",
+    "StateMatchedGlobalBankAttention",
     "TrainConfig",
     "build_rung",
     "load_plastic_checkpoint",

@@ -9,6 +9,7 @@ from celllm.config import (
     HebbianAttentionConfig,
     ModelConfig,
     PlasticityConfig,
+    StateMatchedBankConfig,
 )
 
 
@@ -66,6 +67,26 @@ def test_cy_hfa_checkpoint_reconstructs_local_field_model(tmp_path):
     assert metadata["architecture"] == "celllm-chat-cy-hfa"
     assert metadata["format_version"] == 3
     assert restored.field_config.key_size == 4
+    state = restored.new_plastic_state(2)
+    assert state.memory.shape == (2, 4, 3, 4)
+    assert state.normalizer.shape == (2, 4, 4)
+
+
+def test_state_matched_bank_checkpoint_round_trip(tmp_path):
+    model = CellLMChatModel(
+        ModelConfig(n=4, d=8, r=1, k=3, vocab_size=300),
+        bank=StateMatchedBankConfig(
+            slots=4, key_size=4, value_size=3, chunk_size=4
+        ),
+    )
+    path = tmp_path / "bank.pt"
+
+    save_chat_checkpoint(path, model, step=21)
+    restored, metadata = load_chat_checkpoint(path)
+
+    assert metadata["architecture"] == "celllm-chat-delta-hebb-bank"
+    assert metadata["format_version"] == 4
+    assert restored.bank_config.slots == 4
     state = restored.new_plastic_state(2)
     assert state.memory.shape == (2, 4, 3, 4)
     assert state.normalizer.shape == (2, 4, 4)
