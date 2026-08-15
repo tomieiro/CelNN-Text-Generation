@@ -62,6 +62,50 @@ ovpn-job-submitter \
 
 It writes to `outputs/chat-bank`, separately from CY-HFA in `outputs/chat`.
 
+## Stage 8.3 local associative pilot
+
+The first controlled pilot reuses the seed-7 BANK checkpoint from job 11835
+and trains two additions with the same data, tokenizer procedure, dimensions,
+16-cell blocks, 15 settling steps and 20,000-step budget. Both local variants
+use radius 1 to preserve the geometry of the frozen BANK baseline.
+
+Submit the parameter-matched local controls as independent A100 jobs:
+
+```bash
+ovpn-job-submitter \
+  experiment-chat/experiment-chat-bank-local-ungated-gpu.ipynb \
+  /home/tomieiro/Desktop/SSH \
+  --include-files \
+  --partition arandu \
+  --gpus 1 \
+  --cpus 12 \
+  --time-limit 08:00:00 \
+  --async
+
+ovpn-job-submitter \
+  experiment-chat/experiment-chat-bank-local-gated-gpu.ipynb \
+  /home/tomieiro/Desktop/SSH \
+  --include-files \
+  --partition arandu \
+  --gpus 1 \
+  --cpus 12 \
+  --time-limit 08:00:00 \
+  --async
+```
+
+Record the two returned job IDs and collect each one with:
+
+```bash
+ovpn-job-submitter --collect-results JOB_ID
+```
+
+Outputs are isolated under `chat-bank-local-ungated` and
+`chat-bank-local-gated`. If the gated pilot shows a useful signal, repeat all
+three arms from scratch with additional frozen seeds before making an
+architectural claim. BANK has fewer parameters than either local arm; the
+UNGATED versus GATED comparison is the parameter-matched test of whether
+content gating, rather than merely extra local capacity, adds value.
+
 The collected `outputs/chat/evaluation.json` reports the overall keyword
 recall, per-category scores, every generated response, and a repeated-bigram
 rate to expose degenerate loops. It is an explicit acceptance report, not a

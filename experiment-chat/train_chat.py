@@ -24,6 +24,7 @@ from celllm.chat_tokenizer import ChatTokenizer
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
+    LocalAssociativeConfig,
     ModelConfig,
     StateMatchedBankConfig,
 )
@@ -61,9 +62,7 @@ def arguments() -> argparse.Namespace:
         "--attention",
         choices=("field", "global", "bank"),
         default="field",
-        help=(
-            "CY-HFA field, small global Delta-Hebb, or state-matched bank"
-        ),
+        help=("CY-HFA field, small global Delta-Hebb, or state-matched bank"),
     )
     parser.add_argument("--memory-size", type=int, default=32)
     parser.add_argument("--hebb-rate", type=float, default=0.1)
@@ -72,6 +71,14 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--max-diffusion", type=float, default=0.25)
     parser.add_argument("--diffusion-radius", type=int, default=1)
     parser.add_argument("--retrieval-scale", type=float, default=0.1)
+    parser.add_argument(
+        "--local-associative",
+        choices=("none", "ungated", "gated"),
+        default="none",
+        help="add stateless causal local messages to the BANK baseline",
+    )
+    parser.add_argument("--local-radius", type=int, default=2)
+    parser.add_argument("--local-retrieval-scale", type=float, default=0.1)
     parser.add_argument(
         "--detach-memory",
         action="store_true",
@@ -101,9 +108,7 @@ def evaluate(model, loader, device: str, batches: int = 10) -> float:
         for index, (tokens, mask) in enumerate(loader):
             if index == batches:
                 break
-            losses.append(
-                model.loss(tokens.to(device), mask.to(device)).item()
-            )
+            losses.append(model.loss(tokens.to(device), mask.to(device)).item())
     model.train()
     return sum(losses) / len(losses)
 
@@ -154,8 +159,7 @@ def main() -> None:
         unique = {}
         for conversation in load_jsonl(data_path):
             key = tuple(
-                (message.role, message.content)
-                for message in conversation.messages
+                (message.role, message.content) for message in conversation.messages
             )
             unique[key] = conversation
         source = list(unique.values())
@@ -167,11 +171,10 @@ def main() -> None:
         for index, (train_source, _) in enumerate(sources)
         for item in train_source * (args.curriculum_repeat if index == 0 else 1)
     ]
-    valid_conversations = [
-        item for _, valid_source in sources for item in valid_source
-    ]
+    valid_conversations = [item for _, valid_source in sources for item in valid_source]
     tokenizer_conversations = [
-        item for train_source, valid_source in sources
+        item
+        for train_source, valid_source in sources
         for item in (*train_source, *valid_source)
     ]
     random.Random(args.seed).shuffle(train_conversations)
@@ -196,8 +199,22 @@ def main() -> None:
                 f"resume checkpoint uses {resumed_attention} attention, "
                 f"not {args.attention}"
             )
+        resumed_local = (
+            "none"
+            if model.local_config is None
+            else "gated"
+            if model.local_config.gated
+            else "ungated"
+        )
+        if args.local_associative != resumed_local:
+            raise ValueError(
+                f"resume checkpoint uses {resumed_local} local messages, "
+                f"not {args.local_associative}"
+            )
         start_step = int(checkpoint["step"])
     else:
+        if args.local_associative != "none" and args.attention != "bank":
+            raise ValueError("local associative messages require --attention bank")
         tokenizer = ChatTokenizer.train(
             (
                 text
@@ -250,7 +267,18 @@ def main() -> None:
                 detach_updates=args.detach_memory,
                 chunk_size=args.context,
             )
-            model = CellLMChatModel(model_config, bank=bank)
+            local = (
+                None
+                if args.local_associative == "none"
+                else LocalAssociativeConfig(
+                    radius=args.local_radius,
+                    key_size=args.memory_size,
+                    value_size=args.memory_size,
+                    gated=args.local_associative == "gated",
+                    retrieval_scale=args.local_retrieval_scale,
+                )
+            )
+            model = CellLMChatModel(model_config, bank=bank, local=local)
         model.to(args.device)
         checkpoint = {}
         start_step = 0

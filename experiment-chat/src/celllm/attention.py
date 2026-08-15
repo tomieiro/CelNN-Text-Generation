@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
+from enum import IntEnum
 
 import torch
 from celnn import (
@@ -17,8 +19,35 @@ from celllm.ablation import AblationTrace
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
+    LocalAssociativeConfig,
     StateMatchedBankConfig,
 )
+
+
+class BankWriteAction(IntEnum):
+    """One controlled intervention on a global-bank write candidate."""
+
+    FULL = 0
+    NO_ACTION = 1
+    DECAY_ONLY = 2
+    WRITE_NO_DECAY = 3
+
+
+@dataclass(frozen=True)
+class BankWriteCandidates:
+    """Projected BANK associations, controls, routing, and pre-write error."""
+
+    keys: torch.Tensor
+    values: torch.Tensor
+    rates: torch.Tensor
+    retentions: torch.Tensor
+    routing: torch.Tensor
+    associative_error: torch.Tensor | None
+
+    @property
+    def shape(self) -> torch.Size:
+        """Return the common batch/sequence candidate axes."""
+        return self.rates.shape
 
 
 class DeltaHebbianAttention(nn.Module):
@@ -88,9 +117,10 @@ class DeltaHebbianAttention(nn.Module):
         value = torch.tanh(self.value(activity))
         controls = torch.sigmoid(self.write_controls(activity))
         learning_rate = self.config.learning_rate * controls[..., 0]
-        retention = self.config.min_retention + (
-            1.0 - self.config.min_retention
-        ) * controls[..., 1]
+        retention = (
+            self.config.min_retention
+            + (1.0 - self.config.min_retention) * controls[..., 1]
+        )
         return key, value, learning_rate, retention
 
     def write(self, state, activity: torch.Tensor, mask=None):
@@ -127,9 +157,7 @@ class StateMatchedGlobalBankAttention(nn.Module):
     two radius-one diffusion parameters used by CY-HFA.
     """
 
-    def __init__(
-        self, dimensions: int, config: StateMatchedBankConfig
-    ) -> None:
+    def __init__(self, dimensions: int, config: StateMatchedBankConfig) -> None:
         super().__init__()
         self.dimensions = int(dimensions)
         self.config = config
@@ -156,10 +184,7 @@ class StateMatchedGlobalBankAttention(nn.Module):
         positions = torch.arange(config.slots, dtype=torch.float32)[:, None]
         frequencies = torch.arange(config.key_size, dtype=torch.float32)[None]
         addresses = torch.cos(
-            math.pi
-            * (positions + 0.5)
-            * frequencies
-            / float(config.slots)
+            math.pi * (positions + 0.5) * frequencies / float(config.slots)
         )
         addresses = torch.nn.functional.normalize(addresses, dim=-1)
         self.register_buffer("slot_addresses", addresses)
@@ -192,9 +217,7 @@ class StateMatchedGlobalBankAttention(nn.Module):
     def _routing(
         self, projected: torch.Tensor, temperature: torch.Tensor
     ) -> torch.Tensor:
-        with torch.autocast(
-            device_type=projected.device.type, enabled=False
-        ):
+        with torch.autocast(device_type=projected.device.type, enabled=False):
             scores = torch.einsum(
                 "b...k,sk->b...s",
                 projected.float(),
@@ -214,12 +237,8 @@ class StateMatchedGlobalBankAttention(nn.Module):
         query = self.query(activity)
         slot_values = self.memory.read_all(state, query)
         routing = self._routing(query, self.read_temperature)
-        with torch.autocast(
-            device_type=activity.device.type, enabled=False
-        ):
-            retrieved = torch.einsum(
-                "b...s,b...sv->b...v", routing, slot_values
-            )
+        with torch.autocast(device_type=activity.device.type, enabled=False):
+            retrieved = torch.einsum("b...s,b...sv->b...v", routing, slot_values)
         projected = self.output(retrieved.to(activity.dtype))
         drive = (self.retrieval_scale * projected).to(activity.dtype)
         if not enabled:
@@ -235,10 +254,161 @@ class StateMatchedGlobalBankAttention(nn.Module):
         value = torch.tanh(self.value(activity))
         controls = torch.sigmoid(self.write_controls(activity))
         rate = self.config.learning_rate * controls[..., 0]
-        retention = self.config.min_retention + (
-            1.0 - self.config.min_retention
-        ) * controls[..., 1]
+        retention = (
+            self.config.min_retention
+            + (1.0 - self.config.min_retention) * controls[..., 1]
+        )
         return key, value, rate, retention
+
+    def prepare_write(
+        self,
+        state: AssociativeFieldState,
+        activity: torch.Tensor,
+        *,
+        measure_error: bool = True,
+    ) -> BankWriteCandidates:
+        """Prepare immutable candidates without changing fast memory.
+
+        The weighted error is measured against every routed slot before any
+        candidate in the block is committed. This mirrors the BANK rule,
+        whose completed block is observed only after its logits are fixed.
+        """
+        if activity.ndim != 3:
+            raise ValueError("activity must have shape (batch, sequence, features)")
+        keys, values, rates, retentions = self.associations(activity)
+        routing = self._routing(keys, self.write_temperature)
+        associative_error = None
+        if measure_error:
+            predictions = self.memory.read_all(state, keys)
+            with torch.autocast(device_type=activity.device.type, enabled=False):
+                errors = (
+                    (values.float().unsqueeze(-2) - predictions.float())
+                    .square()
+                    .mean(dim=-1)
+                )
+                associative_error = (routing.float() * errors).sum(dim=-1)
+        return BankWriteCandidates(
+            keys=keys,
+            values=values,
+            rates=rates,
+            retentions=retentions,
+            routing=routing,
+            associative_error=associative_error,
+        )
+
+    @staticmethod
+    def _select_state(
+        selector: torch.Tensor,
+        selected: AssociativeFieldState,
+        fallback: AssociativeFieldState,
+    ) -> AssociativeFieldState:
+        """Select one state per batch item while retaining a shared counter."""
+        memory_selector = selector[:, None, None, None]
+        normalizer_selector = selector[:, None, None]
+        return AssociativeFieldState(
+            torch.where(memory_selector, selected.memory, fallback.memory),
+            torch.where(
+                normalizer_selector,
+                selected.normalizer,
+                fallback.normalizer,
+            ),
+            selected.updates,
+        )
+
+    def apply_write(
+        self,
+        state: AssociativeFieldState,
+        candidates: BankWriteCandidates,
+        mask: torch.Tensor | None = None,
+        actions: torch.Tensor | None = None,
+    ) -> AssociativeFieldState:
+        """Commit candidates with independently controlled causal actions.
+
+        ``actions`` has the candidate batch/sequence shape and contains
+        :class:`BankWriteAction` values. A masked candidate is an exact tensor
+        identity. The update counter advances once per candidate to preserve
+        the original BANK bookkeeping, including for padding.
+        """
+        if mask is not None and mask.shape != candidates.shape:
+            raise ValueError("write mask must match candidate axes")
+        controlled = actions is not None
+        if actions is None:
+            actions = torch.full(
+                candidates.shape,
+                int(BankWriteAction.FULL),
+                dtype=torch.int64,
+                device=candidates.rates.device,
+            )
+        elif actions.shape != candidates.shape:
+            raise ValueError("write actions must match candidate axes")
+        if actions.dtype == torch.bool or actions.is_floating_point():
+            raise ValueError("write actions must use an integer dtype")
+        minimum = int(actions.min().item())
+        maximum = int(actions.max().item())
+        if minimum < int(BankWriteAction.FULL) or maximum > int(
+            BankWriteAction.WRITE_NO_DECAY
+        ):
+            raise ValueError("unknown BANK write action")
+
+        next_state = state
+        slots = self.config.slots
+        for index in range(candidates.shape[1]):
+            assignment = candidates.routing[:, index]
+            rate = candidates.rates[:, index, None].float() * assignment
+            retention = 1.0 - assignment * (
+                1.0 - candidates.retentions[:, index, None].float()
+            )
+            key = candidates.keys[:, index, None].expand(-1, slots, -1)
+            value = candidates.values[:, index, None].expand(-1, slots, -1)
+            full = self.memory.write(
+                next_state,
+                key,
+                value,
+                learning_rate=rate,
+                retention=retention,
+            )
+            identity = AssociativeFieldState(
+                next_state.memory,
+                next_state.normalizer,
+                next_state.updates + 1,
+            )
+            if not controlled:
+                updated = full
+                if mask is not None:
+                    updated = self._select_state(
+                        ~mask[:, index].bool(), identity, updated
+                    )
+                next_state = updated
+                continue
+            no_decay = self.memory.write(
+                next_state,
+                key,
+                value,
+                learning_rate=rate,
+                retention=torch.ones_like(retention),
+            )
+            decay = AssociativeFieldState(
+                retention[..., None, None] * next_state.memory,
+                retention[..., None] * next_state.normalizer,
+                next_state.updates + 1,
+            )
+            action = actions[:, index]
+            updated = full
+            updated = self._select_state(
+                action == int(BankWriteAction.NO_ACTION), identity, updated
+            )
+            updated = self._select_state(
+                action == int(BankWriteAction.DECAY_ONLY), decay, updated
+            )
+            updated = self._select_state(
+                action == int(BankWriteAction.WRITE_NO_DECAY),
+                no_decay,
+                updated,
+            )
+            if mask is not None:
+                updated = self._select_state(~mask[:, index].bool(), identity, updated)
+            next_state = updated
+        return next_state
 
     def write(
         self,
@@ -247,34 +417,105 @@ class StateMatchedGlobalBankAttention(nn.Module):
         mask: torch.Tensor | None = None,
     ) -> AssociativeFieldState:
         """Route completed-block associations into independent global slots."""
+        candidates = self.prepare_write(state, activity, measure_error=False)
+        return self.apply_write(state, candidates, mask=mask)
+
+
+class LocalAssociativeMessagePassing(nn.Module):
+    """Stateless causal kernel attention over preceding lattice cells.
+
+    The module constructs the normalized Hebbian numerator/normalizer
+    implicitly at every refinement. It owns no recurrent fast state and cannot
+    carry information across blocks; that remains the global BANK's role.
+    """
+
+    def __init__(self, dimensions: int, config: LocalAssociativeConfig) -> None:
+        super().__init__()
+        self.dimensions = int(dimensions)
+        self.config = config
+        self.query = nn.Linear(dimensions, config.key_size, bias=False)
+        self.key = nn.Linear(dimensions, config.key_size, bias=False)
+        self.value = nn.Linear(dimensions, config.value_size, bias=False)
+        self.output = nn.Linear(config.value_size, dimensions, bias=False)
+        self.gate = nn.Linear(4 * dimensions, 1)
+        self.offset_bias = nn.Parameter(torch.zeros(config.radius))
+        nn.init.zeros_(self.gate.weight)
+        nn.init.zeros_(self.gate.bias)
+        scale = torch.tensor(float(config.retrieval_scale))
+        if config.learnable_retrieval_scale:
+            self.retrieval_scale = nn.Parameter(scale)
+        else:
+            self.register_buffer("retrieval_scale", scale)
+
+    @staticmethod
+    def _features(projected: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.elu(projected.float()) + 1.0
+
+    def forward(
+        self,
+        activity: torch.Tensor,
+        global_drive: torch.Tensor,
+        *,
+        mask: torch.Tensor | None = None,
+        return_weights: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Return local drive and optionally normalized causal edge weights."""
         if activity.ndim != 3:
-            raise ValueError("activity must have shape (batch, sequence, features)")
+            raise ValueError("activity must have shape (batch, cells, features)")
+        if global_drive.shape != activity.shape:
+            raise ValueError("global drive must match activity")
         if mask is not None and mask.shape != activity.shape[:2]:
-            raise ValueError("write mask must match batch and sequence axes")
-        keys, values, rates, retentions = self.associations(activity)
-        routing = self._routing(keys, self.write_temperature)
-        next_state = state
-        slots = self.config.slots
-        for index in range(activity.shape[1]):
-            assignment = routing[:, index]
-            rate = rates[:, index, None].float() * assignment
-            retention = 1.0 - assignment * (
-                1.0 - retentions[:, index, None].float()
-            )
+            raise ValueError("local mask must match batch and cells")
+        batch, cells, _ = activity.shape
+        query = self._features(self.query(activity))
+        keys = self._features(self.key(activity))
+        values = torch.tanh(self.value(activity)).float()
+        numerator = activity.new_zeros(
+            (batch, cells, self.config.value_size), dtype=torch.float32
+        )
+        denominator = activity.new_zeros((batch, cells), dtype=torch.float32)
+        edge_weights = activity.new_zeros(
+            (batch, cells, self.config.radius), dtype=torch.float32
+        )
+        positions = torch.arange(cells, device=activity.device)
+        for offset in range(1, self.config.radius + 1):
+            source_positions = (positions - offset).clamp_min(0)
+            source_activity = activity.index_select(1, source_positions)
+            source_keys = keys.index_select(1, source_positions)
+            source_values = values.index_select(1, source_positions)
+            valid = positions.ge(offset)[None].expand(batch, -1)
             if mask is not None:
-                active = mask[:, index, None].to(rate.dtype)
-                rate = rate * active
-                retention = retention * active + (1.0 - active)
-            key = keys[:, index, None].expand(-1, slots, -1)
-            value = values[:, index, None].expand(-1, slots, -1)
-            next_state = self.memory.write(
-                next_state,
-                key,
-                value,
-                learning_rate=rate,
-                retention=retention,
-            )
-        return next_state
+                receiver_valid = mask.bool()
+                source_valid = mask.index_select(1, source_positions).bool()
+                valid = valid & receiver_valid & source_valid
+            kernel = (query * source_keys).sum(dim=-1) / self.config.key_size
+            if self.config.gated:
+                gate_input = torch.cat(
+                    (
+                        activity,
+                        source_activity,
+                        activity - source_activity,
+                        global_drive,
+                    ),
+                    dim=-1,
+                )
+                gate = torch.sigmoid(
+                    self.gate(gate_input).squeeze(-1) + self.offset_bias[offset - 1]
+                ).float()
+            else:
+                gate = torch.ones_like(kernel, dtype=torch.float32)
+            weight = gate * kernel.float() * valid.to(torch.float32)
+            numerator = numerator + weight[..., None] * source_values
+            denominator = denominator + weight
+            edge_weights[..., offset - 1] = weight
+        retrieved = numerator / (denominator[..., None] + self.config.epsilon)
+        drive = self.retrieval_scale * self.output(retrieved.to(activity.dtype))
+        if mask is not None:
+            drive = drive * mask[..., None].to(drive.dtype)
+        if return_weights:
+            normalized = edge_weights / (denominator[..., None] + self.config.epsilon)
+            return drive, normalized
+        return drive
 
 
 class CausalFieldPropagation(nn.Module):
@@ -345,9 +586,7 @@ class InterBlockFieldCarry(nn.Module):
     adding recurrent state.
     """
 
-    def forward(
-        self, state: AssociativeFieldState
-    ) -> AssociativeFieldState:
+    def forward(self, state: AssociativeFieldState) -> AssociativeFieldState:
         memory = state.memory.mean(dim=1, keepdim=True)
         normalizer = state.normalizer.mean(dim=1, keepdim=True)
         return AssociativeFieldState(
@@ -435,14 +674,13 @@ class ChuaYangHebbianFieldAttention(nn.Module):
         value = torch.tanh(self.value(activity))
         controls = torch.sigmoid(self.write_controls(activity))
         rate = self.config.learning_rate * controls[..., 0]
-        retention = self.config.min_retention + (
-            1.0 - self.config.min_retention
-        ) * controls[..., 1]
+        retention = (
+            self.config.min_retention
+            + (1.0 - self.config.min_retention) * controls[..., 1]
+        )
         return key, value, rate, retention
 
-    def propagate(
-        self, state: AssociativeFieldState
-    ) -> AssociativeFieldState:
+    def propagate(self, state: AssociativeFieldState) -> AssociativeFieldState:
         """Apply the same causal cellular operator to ``M_i`` and ``s_i``."""
         return AssociativeFieldState(
             self.propagation(state.memory),
@@ -502,9 +740,7 @@ class ChuaYangHebbianFieldAttention(nn.Module):
         else:
             written = propagated
         if trace is not None:
-            trace.record_delta(
-                "write_memory_delta", propagated.memory, written.memory
-            )
+            trace.record_delta("write_memory_delta", propagated.memory, written.memory)
             trace.record_delta(
                 "write_normalizer_delta",
                 propagated.normalizer,

@@ -23,6 +23,7 @@ from celllm.cell import (
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
+    LocalAssociativeConfig,
     ModelConfig,
     PlasticityConfig,
     StateMatchedBankConfig,
@@ -71,12 +72,8 @@ class PlasticCelNNLanguageModel(nn.Module):
         self.cfg = replace(cfg, mixer="dense")
         self.plasticity_config = plasticity or PlasticityConfig()
         self.embed = nn.Embedding(self.cfg.vocab_size, self.cfg.d)
-        self.cell = PlasticCelNNCell(
-            self.cfg, self.plasticity_config, causal=True
-        )
-        self.readout = nn.Linear(
-            self.cfg.d, self.cfg.vocab_size, bias=True
-        )
+        self.cell = PlasticCelNNCell(self.cfg, self.plasticity_config, causal=True)
+        self.readout = nn.Linear(self.cfg.d, self.cfg.vocab_size, bias=True)
         self.readout.weight = self.embed.weight
         nn.init.normal_(self.embed.weight, std=0.02)
 
@@ -98,9 +95,7 @@ class PlasticCelNNLanguageModel(nn.Module):
         cell_input = self.cell.control_input(embedding)
         state = torch.zeros_like(embedding)
         for _ in range(self.cfg.k):
-            state = self.cell.step_with_memory(
-                state, cell_input, plastic_state
-            )
+            state = self.cell.step_with_memory(state, cell_input, plastic_state)
         next_plastic_state = (
             self.cell.observe(plastic_state, state)
             if update_plasticity
@@ -138,16 +133,10 @@ class HebbianAttentionCelNNLanguageModel(nn.Module):
     ) -> None:
         super().__init__()
         self.cfg = replace(cfg, mixer="dense")
-        self.memory_config = memory or HebbianAttentionConfig(
-            chunk_size=self.cfg.n
-        )
+        self.memory_config = memory or HebbianAttentionConfig(chunk_size=self.cfg.n)
         self.embed = nn.Embedding(self.cfg.vocab_size, self.cfg.d)
-        self.cell = HebbianAttentionCelNNCell(
-            self.cfg, self.memory_config, causal=True
-        )
-        self.readout = nn.Linear(
-            self.cfg.d, self.cfg.vocab_size, bias=True
-        )
+        self.cell = HebbianAttentionCelNNCell(self.cfg, self.memory_config, causal=True)
+        self.readout = nn.Linear(self.cfg.d, self.cfg.vocab_size, bias=True)
         self.readout.weight = self.embed.weight
         nn.init.normal_(self.embed.weight, std=0.02)
 
@@ -214,6 +203,7 @@ class StateMatchedBankCelNNLanguageModel(nn.Module):
         self,
         cfg: ModelConfig,
         bank: StateMatchedBankConfig | None = None,
+        local: LocalAssociativeConfig | None = None,
     ) -> None:
         super().__init__()
         self.cfg = replace(cfg, mixer="dense")
@@ -224,13 +214,12 @@ class StateMatchedBankCelNNLanguageModel(nn.Module):
         )
         if self.bank_config.slots != self.cfg.n:
             raise ValueError("state-matched bank slots must equal lattice size")
+        self.local_config = local
         self.embed = nn.Embedding(self.cfg.vocab_size, self.cfg.d)
         self.cell = StateMatchedBankCelNNCell(
-            self.cfg, self.bank_config, causal=True
+            self.cfg, self.bank_config, local=local, causal=True
         )
-        self.readout = nn.Linear(
-            self.cfg.d, self.cfg.vocab_size, bias=True
-        )
+        self.readout = nn.Linear(self.cfg.d, self.cfg.vocab_size, bias=True)
         self.readout.weight = self.embed.weight
         nn.init.normal_(self.embed.weight, std=0.02)
 
@@ -254,9 +243,7 @@ class StateMatchedBankCelNNLanguageModel(nn.Module):
             memory_state = memory_state.reset()
         if trace is not None:
             trace.record("block_input_memory", memory_state.memory)
-            trace.record(
-                "block_input_normalizer", memory_state.normalizer
-            )
+            trace.record("block_input_normalizer", memory_state.normalizer)
         embedding = self.embed(tokens)
         cell_input = self.cell.control_input(embedding)
         state = torch.zeros_like(embedding)
@@ -266,6 +253,7 @@ class StateMatchedBankCelNNLanguageModel(nn.Module):
                 cell_input,
                 memory_state,
                 retrieval_enabled=ablation.retrieval_enabled,
+                local_mask=write_mask,
                 trace=trace,
             )
         next_memory = (
@@ -313,12 +301,8 @@ class CYHFACelNNLanguageModel(nn.Module):
         if self.field_config.chunk_size > self.cfg.n:
             raise ValueError("field chunk size cannot exceed lattice size")
         self.embed = nn.Embedding(self.cfg.vocab_size, self.cfg.d)
-        self.cell = CYHFACelNNCell(
-            self.cfg, self.field_config, causal=True
-        )
-        self.readout = nn.Linear(
-            self.cfg.d, self.cfg.vocab_size, bias=True
-        )
+        self.cell = CYHFACelNNCell(self.cfg, self.field_config, causal=True)
+        self.readout = nn.Linear(self.cfg.d, self.cfg.vocab_size, bias=True)
         self.readout.weight = self.embed.weight
         nn.init.normal_(self.embed.weight, std=0.02)
 

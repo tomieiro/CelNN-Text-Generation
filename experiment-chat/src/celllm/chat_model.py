@@ -14,6 +14,7 @@ from celllm.ablation import (
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
+    LocalAssociativeConfig,
     ModelConfig,
     PlasticityConfig,
     StateMatchedBankConfig,
@@ -36,6 +37,7 @@ class CellLMChatModel(nn.Module):
         *,
         memory: HebbianAttentionConfig | None = None,
         bank: StateMatchedBankConfig | None = None,
+        local: LocalAssociativeConfig | None = None,
         field: CYHFAConfig | None = None,
     ) -> None:
         super().__init__()
@@ -43,28 +45,32 @@ class CellLMChatModel(nn.Module):
             option is not None for option in (plasticity, memory, bank, field)
         )
         if selected > 1:
-            raise ValueError(
-                "choose legacy plasticity, global memory, bank, or CY-HFA"
-            )
+            raise ValueError("choose legacy plasticity, global memory, bank, or CY-HFA")
+        if local is not None and bank is None:
+            raise ValueError("local associative messages require BANK")
         if plasticity is not None:
             self.core = PlasticCelNNLanguageModel(model, plasticity)
             self.memory_config = None
             self.bank_config = None
+            self.local_config = None
             self.field_config = None
         elif memory is not None:
             self.core = HebbianAttentionCelNNLanguageModel(model, memory)
             self.memory_config = self.core.memory_config
             self.bank_config = None
+            self.local_config = None
             self.field_config = None
         elif bank is not None:
-            self.core = StateMatchedBankCelNNLanguageModel(model, bank)
+            self.core = StateMatchedBankCelNNLanguageModel(model, bank, local=local)
             self.memory_config = None
             self.bank_config = self.core.bank_config
+            self.local_config = self.core.local_config
             self.field_config = None
         else:
             self.core = CYHFACelNNLanguageModel(model, field)
             self.memory_config = None
             self.bank_config = None
+            self.local_config = None
             self.field_config = self.core.field_config
 
     @property
@@ -152,16 +158,10 @@ class CellLMChatModel(nn.Module):
         token_chunks = token_ids.split(self.chunk_size, dim=1)
         mask_chunks = token_ids.ne(0).split(self.chunk_size, dim=1)
         for chunk, write_mask in zip(token_chunks, mask_chunks):
-            kwargs = (
-                {"write_mask": write_mask}
-                if self.uses_associative_state
-                else {}
-            )
+            kwargs = {"write_mask": write_mask} if self.uses_associative_state else {}
             if self.uses_associative_state:
                 kwargs.update({"ablation": ablation, "trace": trace})
-            chunk_logits, memory = self.forward_with_state(
-                chunk, memory, **kwargs
-            )
+            chunk_logits, memory = self.forward_with_state(chunk, memory, **kwargs)
             logits.append(chunk_logits)
         return torch.cat(logits, dim=1)
 
@@ -176,9 +176,9 @@ class CellLMChatModel(nn.Module):
         """Return assistant NLL sums and token counts for each dialogue."""
         if token_ids.shape != assistant_mask.shape:
             raise ValueError("token_ids and assistant_mask must have same shape")
-        predictions = self.sequence_logits(
-            token_ids, ablation=ablation, trace=trace
-        )[:, :-1]
+        predictions = self.sequence_logits(token_ids, ablation=ablation, trace=trace)[
+            :, :-1
+        ]
         targets = token_ids[:, 1:]
         mask = assistant_mask[:, 1:]
         if not torch.any(mask):

@@ -13,11 +13,13 @@ from celllm.config import ModelConfig, PlasticityConfig
 from celllm.attention import (
     ChuaYangHebbianFieldAttention,
     DeltaHebbianAttention,
+    LocalAssociativeMessagePassing,
     StateMatchedGlobalBankAttention,
 )
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
+    LocalAssociativeConfig,
     StateMatchedBankConfig,
 )
 from celllm.mixers import PlasticDenseMixer, build_mixer
@@ -131,9 +133,7 @@ class HebbianAttentionCelNNCell(CelNNCell):
 
     def observe(self, memory_state, activity: torch.Tensor, mask=None):
         """Write bounded outputs only after a causal block is complete."""
-        return self.attention.write(
-            memory_state, piecewise_linear(activity), mask=mask
-        )
+        return self.attention.write(memory_state, piecewise_linear(activity), mask=mask)
 
 
 class StateMatchedBankCelNNCell(CelNNCell):
@@ -143,10 +143,16 @@ class StateMatchedBankCelNNCell(CelNNCell):
         self,
         cfg: ModelConfig,
         bank: StateMatchedBankConfig,
+        local: LocalAssociativeConfig | None = None,
         causal: bool = True,
     ) -> None:
         super().__init__(cfg, causal=causal)
         self.attention = StateMatchedGlobalBankAttention(cfg.d, bank)
+        if local is not None and local.radius > cfg.r:
+            raise ValueError("local associative radius cannot exceed CelNN radius")
+        self.local_attention = (
+            None if local is None else LocalAssociativeMessagePassing(cfg.d, local)
+        )
 
     def new_memory_state(self, batch_size: int):
         return self.attention.new_state(batch_size)
@@ -158,8 +164,30 @@ class StateMatchedBankCelNNCell(CelNNCell):
         memory_state,
         *,
         retrieval_enabled: bool = True,
+        local_mask: torch.Tensor | None = None,
         trace: AblationTrace | None = None,
     ) -> torch.Tensor:
+        next_state, _ = self.refine_with_memory(
+            x,
+            cell_input,
+            memory_state,
+            retrieval_enabled=retrieval_enabled,
+            local_mask=local_mask,
+            trace=trace,
+        )
+        return next_state
+
+    def refine_with_memory(
+        self,
+        x: torch.Tensor,
+        cell_input: torch.Tensor,
+        memory_state,
+        *,
+        retrieval_enabled: bool = True,
+        local_mask: torch.Tensor | None = None,
+        trace: AblationTrace | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Advance once and expose the retrieval drive for diagnostics."""
         output = piecewise_linear(x)
         memory_drive = self.attention.retrieve(
             output,
@@ -167,11 +195,23 @@ class StateMatchedBankCelNNCell(CelNNCell):
             enabled=retrieval_enabled,
             trace=trace,
         )
-        return self.dynamics.step(
+        local_drive = (
+            torch.zeros_like(memory_drive)
+            if self.local_attention is None
+            else self.local_attention(
+                output,
+                memory_drive,
+                mask=local_mask,
+            )
+        )
+        if trace is not None and self.local_attention is not None:
+            trace.record("local_retrieval_drive", local_drive)
+        next_state = self.dynamics.step(
             x,
             cell_input,
-            extra_drive=self.mixer(x) + memory_drive,
+            extra_drive=self.mixer(x) + memory_drive + local_drive,
         )
+        return next_state, memory_drive
 
     def observe(
         self,
@@ -183,9 +223,7 @@ class StateMatchedBankCelNNCell(CelNNCell):
         trace: AblationTrace | None = None,
     ):
         updated = (
-            self.attention.write(
-                memory_state, piecewise_linear(activity), mask=mask
-            )
+            self.attention.write(memory_state, piecewise_linear(activity), mask=mask)
             if write_enabled
             else memory_state
         )
@@ -213,9 +251,7 @@ class CYHFACelNNCell(CelNNCell):
             raise ValueError("CY-HFA language modeling requires causal dynamics")
         super().__init__(cfg, causal=True)
         if field.diffusion_radius > cfg.r:
-            raise ValueError(
-                "field diffusion radius cannot exceed the CelNN radius"
-            )
+            raise ValueError("field diffusion radius cannot exceed the CelNN radius")
         self.attention = ChuaYangHebbianFieldAttention(cfg.d, field)
 
     def new_field_state(self, batch_size: int):
