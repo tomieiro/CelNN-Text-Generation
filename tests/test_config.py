@@ -1,6 +1,10 @@
 import pytest
 
-from celllm.config import ModelConfig, PlasticityConfig
+from celllm.config import (
+    HebbianAttentionConfig,
+    ModelConfig,
+    PlasticityConfig,
+)
 
 
 def test_default_config_satisfies_receptive_field():
@@ -30,3 +34,13 @@ def test_plasticity_rule_and_chunk_size_are_validated():
         PlasticityConfig(rule="unknown")
     with pytest.raises(ValueError, match="chunk_size"):
         PlasticityConfig(chunk_size=0)
+
+
+def test_hebbian_attention_configuration_is_validated():
+    assert HebbianAttentionConfig().key_size == 32
+    with pytest.raises(ValueError, match="sizes"):
+        HebbianAttentionConfig(key_size=0)
+    with pytest.raises(ValueError, match="retention"):
+        HebbianAttentionConfig(min_retention=1.1)
+    with pytest.raises(ValueError, match="chunk_size"):
+        HebbianAttentionConfig(chunk_size=0)

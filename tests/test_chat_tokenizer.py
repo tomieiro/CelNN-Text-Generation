@@ -88,3 +88,22 @@ def test_dataset_collation_and_jsonl_loading(tokenizer, tmp_path):
     assert token_ids.shape[0] == 2
     assert token_ids.shape[1] < 24
     assert masks.dtype == torch.bool
+
+
+def test_dataset_discards_examples_truncated_before_assistant(tokenizer):
+    too_long = Conversation(
+        (
+            Message("user", "hello " * 20),
+            Message("assistant", "unreachable"),
+        )
+    )
+    usable = Conversation(
+        (Message("user", "hello"), Message("assistant", "hi"))
+    )
+
+    dataset = ConversationDataset(
+        [too_long, usable], tokenizer, max_length=8
+    )
+
+    assert len(dataset) == 1
+    assert torch.any(dataset[0].assistant_mask)

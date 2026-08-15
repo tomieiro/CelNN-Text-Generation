@@ -2,9 +2,19 @@
 
 from typing import Any
 
-from celllm.config import ModelConfig, PlasticityConfig, TrainConfig
+from celllm.attention import DeltaHebbianAttention
+from celllm.config import (
+    HebbianAttentionConfig,
+    ModelConfig,
+    PlasticityConfig,
+    TrainConfig,
+)
 from celllm.controls import GatedConvLM
-from celllm.model import CelNNLanguageModel, PlasticCelNNLanguageModel
+from celllm.model import (
+    CelNNLanguageModel,
+    HebbianAttentionCelNNLanguageModel,
+    PlasticCelNNLanguageModel,
+)
 from celllm.plastic_checkpoint import (
     load_plastic_checkpoint,
     save_plastic_checkpoint,
@@ -22,7 +32,10 @@ def __getattr__(name: str) -> Any:
 __all__ = [
     "RUNGS",
     "CelNNLanguageModel",
+    "DeltaHebbianAttention",
     "GatedConvLM",
+    "HebbianAttentionCelNNLanguageModel",
+    "HebbianAttentionConfig",
     "ModelConfig",
     "PlasticCelNNLanguageModel",
     "PlasticityConfig",

@@ -45,7 +45,7 @@ def test_session_commits_full_blocks_and_reset_clears_memory():
         sampling=SamplingConfig(max_new_tokens=3, temperature=0),
     )
 
-    response = session.reply("hello")
+    response = session.reply("hello how are you coffee")
 
     assert isinstance(response, str)
     committed = len(session.history) - len(session.pending)

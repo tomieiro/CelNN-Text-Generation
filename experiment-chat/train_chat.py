@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the small Hebbian/Oja CellLM chat model."""
+"""Train the small CellLM with Delta-Hebbian key--value attention."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from celllm.chat_generation import ChatSession, SamplingConfig
 from celllm.chat_evaluation import evaluate_simple_chat
 from celllm.chat_model import CellLMChatModel
 from celllm.chat_tokenizer import ChatTokenizer
-from celllm.config import ModelConfig, PlasticityConfig
+from celllm.config import HebbianAttentionConfig, ModelConfig
 
 SAMPLE_PROMPTS = (
     "hello",
@@ -52,10 +52,15 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--radius", type=int, default=4)
     parser.add_argument("--dynamics-steps", type=int, default=32)
     parser.add_argument("--vocab-size", type=int, default=1_024)
-    parser.add_argument("--rule", choices=("hebbian", "oja"), default="oja")
-    parser.add_argument("--hebb-rate", type=float, default=0.01)
-    parser.add_argument("--decay", type=float, default=0.99)
-    parser.add_argument("--alpha", type=float, default=0.1)
+    parser.add_argument("--memory-size", type=int, default=32)
+    parser.add_argument("--hebb-rate", type=float, default=0.1)
+    parser.add_argument("--min-retention", type=float, default=0.95)
+    parser.add_argument("--retrieval-scale", type=float, default=0.1)
+    parser.add_argument(
+        "--detach-memory",
+        action="store_true",
+        help="detach Hebbian writes between blocks (credit-assignment ablation)",
+    )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--eval-every", type=int, default=500)
     parser.add_argument("--checkpoint-every", type=int, default=250)
@@ -159,6 +164,10 @@ def main() -> None:
     if args.resume:
         tokenizer = ChatTokenizer.load(tokenizer_path)
         model, checkpoint = load_chat_checkpoint(args.resume, args.device)
+        if model.memory_config is None:
+            raise ValueError(
+                "cannot resume a legacy Oja checkpoint into Delta-Hebbian attention"
+            )
         start_step = int(checkpoint["step"])
     else:
         tokenizer = ChatTokenizer.train(
@@ -178,11 +187,13 @@ def main() -> None:
                 k=args.dynamics_steps,
                 vocab_size=tokenizer.vocab_size,
             ),
-            PlasticityConfig(
-                rule=args.rule,
+            memory=HebbianAttentionConfig(
+                key_size=args.memory_size,
+                value_size=args.memory_size,
                 learning_rate=args.hebb_rate,
-                decay=args.decay,
-                alpha=args.alpha,
+                min_retention=args.min_retention,
+                retrieval_scale=args.retrieval_scale,
+                detach_updates=args.detach_memory,
                 chunk_size=args.context,
             ),
         ).to(args.device)
@@ -255,6 +266,7 @@ def main() -> None:
                 "step": current,
                 "train_loss": loss.item(),
                 "valid_loss": validation,
+                "retrieval_scale": float(model.retrieval_scale.detach()),
                 "samples": generated,
                 "behavioral": behavioral,
                 "chat_rank": chat_rank,

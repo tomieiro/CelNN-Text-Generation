@@ -8,7 +8,11 @@ from pathlib import Path
 import torch
 
 from celllm.chat_model import CellLMChatModel
-from celllm.config import ModelConfig, PlasticityConfig
+from celllm.config import (
+    HebbianAttentionConfig,
+    ModelConfig,
+    PlasticityConfig,
+)
 
 
 def save_chat_checkpoint(
@@ -23,13 +27,21 @@ def save_chat_checkpoint(
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
+    is_attention = model.memory_config is not None
+    configuration = (
+        {"memory_config": asdict(model.memory_config)}
+        if is_attention
+        else {"plasticity_config": asdict(model.plasticity_config)}
+    )
     torch.save(
         {
-            "format_version": 1,
-            "architecture": "celllm-chat",
+            "format_version": 2 if is_attention else 1,
+            "architecture": (
+                "celllm-chat-delta-hebb" if is_attention else "celllm-chat"
+            ),
             "step": step,
             "model_config": asdict(model.cfg),
-            "plasticity_config": asdict(model.plasticity_config),
+            **configuration,
             "model_state": model.state_dict(),
             "optimizer_state": optimizer_state,
             "metrics": metrics or {},
@@ -44,12 +56,19 @@ def load_chat_checkpoint(
 ) -> tuple[CellLMChatModel, dict]:
     """Reconstruct a chat model with empty session memory."""
     checkpoint = torch.load(path, map_location=device, weights_only=True)
-    if checkpoint.get("architecture") != "celllm-chat":
+    architecture = checkpoint.get("architecture")
+    if architecture not in {"celllm-chat", "celllm-chat-delta-hebb"}:
         raise ValueError("checkpoint is not a CellLM chat model")
-    model = CellLMChatModel(
-        ModelConfig(**checkpoint["model_config"]),
-        PlasticityConfig(**checkpoint["plasticity_config"]),
-    )
+    if architecture == "celllm-chat-delta-hebb":
+        model = CellLMChatModel(
+            ModelConfig(**checkpoint["model_config"]),
+            memory=HebbianAttentionConfig(**checkpoint["memory_config"]),
+        )
+    else:
+        model = CellLMChatModel(
+            ModelConfig(**checkpoint["model_config"]),
+            PlasticityConfig(**checkpoint["plasticity_config"]),
+        )
     model.load_state_dict(checkpoint["model_state"])
     model.to(device).eval()
     return model, checkpoint

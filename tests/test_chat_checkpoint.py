@@ -4,7 +4,11 @@ import torch
 
 from celllm.chat_checkpoint import load_chat_checkpoint, save_chat_checkpoint
 from celllm.chat_model import CellLMChatModel
-from celllm.config import ModelConfig, PlasticityConfig
+from celllm.config import (
+    HebbianAttentionConfig,
+    ModelConfig,
+    PlasticityConfig,
+)
 
 
 def test_chat_checkpoint_round_trip(tmp_path):
@@ -23,3 +27,21 @@ def test_chat_checkpoint_round_trip(tmp_path):
     assert metadata["step"] == 12
     assert metadata["metrics"] == {"loss": 1.5}
     assert all("memory" not in key for key in metadata["model_state"])
+
+
+def test_delta_hebb_checkpoint_reconstructs_attention_model(tmp_path):
+    model = CellLMChatModel(
+        ModelConfig(n=4, d=8, r=1, k=3, vocab_size=300),
+        memory=HebbianAttentionConfig(
+            key_size=4, value_size=3, chunk_size=4
+        ),
+    )
+    path = tmp_path / "attention.pt"
+
+    save_chat_checkpoint(path, model, step=9)
+    restored, metadata = load_chat_checkpoint(path)
+
+    assert metadata["architecture"] == "celllm-chat-delta-hebb"
+    assert metadata["format_version"] == 2
+    assert restored.memory_config.key_size == 4
+    assert restored.new_plastic_state(2).memory.shape == (2, 3, 4)

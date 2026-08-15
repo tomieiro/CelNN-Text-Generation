@@ -102,10 +102,17 @@ class ConversationDataset(Dataset):
         *,
         max_length: int,
     ) -> None:
-        self.examples = [
+        encoded = [
             encode_conversation(item, tokenizer, max_length=max_length)
             for item in conversations
         ]
+        self.examples = [
+            item for item in encoded if torch.any(item.assistant_mask)
+        ]
+        if not self.examples:
+            raise ValueError(
+                "no conversation has assistant targets within max_length"
+            )
 
     def __len__(self) -> int:
         return len(self.examples)

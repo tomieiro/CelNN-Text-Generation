@@ -6,8 +6,15 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from celllm.config import ModelConfig, PlasticityConfig
-from celllm.model import PlasticCelNNLanguageModel
+from celllm.config import (
+    HebbianAttentionConfig,
+    ModelConfig,
+    PlasticityConfig,
+)
+from celllm.model import (
+    HebbianAttentionCelNNLanguageModel,
+    PlasticCelNNLanguageModel,
+)
 
 
 class CellLMChatModel(nn.Module):
@@ -17,9 +24,18 @@ class CellLMChatModel(nn.Module):
         self,
         model: ModelConfig,
         plasticity: PlasticityConfig | None = None,
+        *,
+        memory: HebbianAttentionConfig | None = None,
     ) -> None:
         super().__init__()
-        self.core = PlasticCelNNLanguageModel(model, plasticity)
+        if plasticity is not None and memory is not None:
+            raise ValueError("choose legacy plasticity or Hebbian attention")
+        if plasticity is not None:
+            self.core = PlasticCelNNLanguageModel(model, plasticity)
+            self.memory_config = None
+        else:
+            self.core = HebbianAttentionCelNNLanguageModel(model, memory)
+            self.memory_config = self.core.memory_config
 
     @property
     def cfg(self) -> ModelConfig:
@@ -27,12 +43,30 @@ class CellLMChatModel(nn.Module):
 
     @property
     def plasticity_config(self) -> PlasticityConfig:
+        if self.memory_config is not None:
+            raise AttributeError("model uses Hebbian attention, not legacy plasticity")
         return self.core.plasticity_config
 
+    @property
+    def chunk_size(self) -> int:
+        config = self.memory_config or self.core.plasticity_config
+        return config.chunk_size
+
+    @property
+    def retrieval_scale(self) -> torch.Tensor | None:
+        if self.memory_config is None:
+            return None
+        return self.core.cell.attention.retrieval_scale
+
     def new_plastic_state(self, batch_size: int):
-        return self.core.new_plastic_state(batch_size)
+        if self.memory_config is None:
+            return self.core.new_plastic_state(batch_size)
+        return self.core.new_memory_state(batch_size)
 
     def forward_with_state(self, *args, **kwargs):
+        if self.memory_config is not None:
+            if "update_plasticity" in kwargs:
+                kwargs["update_memory"] = kwargs.pop("update_plasticity")
         return self.core.forward_with_state(*args, **kwargs)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
@@ -46,10 +80,17 @@ class CellLMChatModel(nn.Module):
             raise ValueError("token_ids and assistant_mask must have same shape")
         memory = self.new_plastic_state(token_ids.shape[0])
         logits = []
-        for chunk in token_ids.split(
-            self.plasticity_config.chunk_size, dim=1
-        ):
-            chunk_logits, memory = self.forward_with_state(chunk, memory)
+        token_chunks = token_ids.split(self.chunk_size, dim=1)
+        mask_chunks = token_ids.ne(0).split(self.chunk_size, dim=1)
+        for chunk, write_mask in zip(token_chunks, mask_chunks):
+            kwargs = (
+                {"write_mask": write_mask}
+                if self.memory_config is not None
+                else {}
+            )
+            chunk_logits, memory = self.forward_with_state(
+                chunk, memory, **kwargs
+            )
             logits.append(chunk_logits)
         predictions = torch.cat(logits, dim=1)[:, :-1]
         targets = token_ids[:, 1:]

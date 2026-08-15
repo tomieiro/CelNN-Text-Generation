@@ -9,6 +9,8 @@ from celnn import DifferentiableCellularNetwork
 from celnn import piecewise_linear as _piecewise_linear
 
 from celllm.config import ModelConfig, PlasticityConfig
+from celllm.attention import DeltaHebbianAttention
+from celllm.config import HebbianAttentionConfig
 from celllm.mixers import PlasticDenseMixer, build_mixer
 
 
@@ -78,3 +80,37 @@ class PlasticCelNNCell(CelNNCell):
         """Update memory from bounded Chua--Yang cell outputs."""
         output = piecewise_linear(activity)
         return self.mixer.observe(plastic_state, output)
+
+
+class HebbianAttentionCelNNCell(CelNNCell):
+    """CelNN dynamics coupled to explicit Delta-Hebbian fast attention."""
+
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        memory: HebbianAttentionConfig,
+        causal: bool = True,
+    ) -> None:
+        super().__init__(cfg, causal=causal)
+        self.attention = DeltaHebbianAttention(cfg.d, memory)
+
+    def new_memory_state(self, batch_size: int):
+        return self.attention.new_state(batch_size)
+
+    def step_with_memory(
+        self, x: torch.Tensor, cell_input: torch.Tensor, memory_state
+    ) -> torch.Tensor:
+        """Read fixed fast weights while advancing one cellular step."""
+        output = piecewise_linear(x)
+        memory_drive = self.attention.retrieve(output, memory_state)
+        return self.dynamics.step(
+            x,
+            cell_input,
+            extra_drive=self.mixer(x) + memory_drive,
+        )
+
+    def observe(self, memory_state, activity: torch.Tensor, mask=None):
+        """Write bounded outputs only after a causal block is complete."""
+        return self.attention.write(
+            memory_state, piecewise_linear(activity), mask=mask
+        )
