@@ -1,6 +1,7 @@
 import pytest
 
 from celllm.config import (
+    CYHFAConfig,
     HebbianAttentionConfig,
     ModelConfig,
     PlasticityConfig,
@@ -44,3 +45,15 @@ def test_hebbian_attention_configuration_is_validated():
         HebbianAttentionConfig(min_retention=1.1)
     with pytest.raises(ValueError, match="chunk_size"):
         HebbianAttentionConfig(chunk_size=0)
+
+
+def test_cy_hfa_configuration_bounds_local_field_dynamics():
+    config = CYHFAConfig()
+    assert config.key_size == 32
+    assert config.diffusion_rate <= config.max_diffusion <= 1
+    with pytest.raises(ValueError, match="diffusion rate"):
+        CYHFAConfig(diffusion_rate=0.3, max_diffusion=0.2)
+    with pytest.raises(ValueError, match="radius"):
+        CYHFAConfig(diffusion_radius=0)
+    with pytest.raises(ValueError, match="epsilon"):
+        CYHFAConfig(epsilon=0)

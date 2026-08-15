@@ -2,8 +2,13 @@
 
 from typing import Any
 
-from celllm.attention import DeltaHebbianAttention
+from celllm.attention import (
+    CausalFieldPropagation,
+    ChuaYangHebbianFieldAttention,
+    DeltaHebbianAttention,
+)
 from celllm.config import (
+    CYHFAConfig,
     HebbianAttentionConfig,
     ModelConfig,
     PlasticityConfig,
@@ -11,6 +16,7 @@ from celllm.config import (
 )
 from celllm.controls import GatedConvLM
 from celllm.model import (
+    CYHFACelNNLanguageModel,
     CelNNLanguageModel,
     HebbianAttentionCelNNLanguageModel,
     PlasticCelNNLanguageModel,
@@ -31,11 +37,15 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "RUNGS",
+    "CYHFAConfig",
+    "CYHFACelNNLanguageModel",
+    "CausalFieldPropagation",
     "CelNNLanguageModel",
     "DeltaHebbianAttention",
     "GatedConvLM",
     "HebbianAttentionCelNNLanguageModel",
     "HebbianAttentionConfig",
+    "ChuaYangHebbianFieldAttention",
     "ModelConfig",
     "PlasticCelNNLanguageModel",
     "PlasticityConfig",

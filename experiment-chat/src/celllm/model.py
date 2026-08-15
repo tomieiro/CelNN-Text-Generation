@@ -9,11 +9,13 @@ import torch.nn.functional as F
 from torch import nn
 
 from celllm.cell import (
+    CYHFACelNNCell,
     CelNNCell,
     HebbianAttentionCelNNCell,
     PlasticCelNNCell,
 )
 from celllm.config import (
+    CYHFAConfig,
     HebbianAttentionConfig,
     ModelConfig,
     PlasticityConfig,
@@ -120,7 +122,7 @@ class PlasticCelNNLanguageModel(nn.Module):
 
 
 class HebbianAttentionCelNNLanguageModel(nn.Module):
-    """Causal CellLM with constant-size Delta-Hebbian key--value attention."""
+    """Causal CellLM with a global Delta-Hebbian attention baseline."""
 
     def __init__(
         self,
@@ -178,6 +180,97 @@ class HebbianAttentionCelNNLanguageModel(nn.Module):
     def loss(self, tokens: torch.Tensor) -> torch.Tensor:
         chunks = tokens.split(self.memory_config.chunk_size, dim=1)
         memory = self.new_memory_state(tokens.shape[0])
+        logits = []
+        for chunk in chunks:
+            chunk_logits, memory = self.forward_with_state(chunk, memory)
+            logits.append(chunk_logits)
+        joined = torch.cat(logits, dim=1)
+        return F.cross_entropy(
+            joined[:, :-1].reshape(-1, self.cfg.vocab_size),
+            tokens[:, 1:].reshape(-1),
+        )
+
+
+class CYHFACelNNLanguageModel(nn.Module):
+    """CellLM with coupled Chua--Yang Hebbian Field Attention dynamics."""
+
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        field: CYHFAConfig | None = None,
+    ) -> None:
+        super().__init__()
+        self.cfg = replace(cfg, mixer="dense")
+        self.field_config = field or CYHFAConfig(chunk_size=self.cfg.n)
+        if self.field_config.chunk_size > self.cfg.n:
+            raise ValueError("field chunk size cannot exceed lattice size")
+        self.embed = nn.Embedding(self.cfg.vocab_size, self.cfg.d)
+        self.cell = CYHFACelNNCell(
+            self.cfg, self.field_config, causal=True
+        )
+        self.readout = nn.Linear(
+            self.cfg.d, self.cfg.vocab_size, bias=True
+        )
+        self.readout.weight = self.embed.weight
+        nn.init.normal_(self.embed.weight, std=0.02)
+
+    def new_field_state(self, batch_size: int):
+        """Create one normalized associative memory per lattice cell."""
+        return self.cell.new_field_state(batch_size)
+
+    def _pad_block(
+        self,
+        tokens: torch.Tensor,
+        write_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        if tokens.ndim != 2:
+            raise ValueError("tokens must have shape (batch, sequence)")
+        length = tokens.shape[1]
+        if not 0 < length <= self.cfg.n:
+            raise ValueError("sequence length must be in [1, lattice size]")
+        if write_mask is None:
+            write_mask = torch.ones_like(tokens, dtype=torch.bool)
+        elif write_mask.shape != tokens.shape:
+            raise ValueError("write mask must match token shape")
+        padding = self.cfg.n - length
+        if padding:
+            tokens = F.pad(tokens, (0, padding), value=0)
+            write_mask = F.pad(write_mask, (0, padding), value=False)
+        return tokens, write_mask, length
+
+    def forward_with_state(
+        self,
+        tokens: torch.Tensor,
+        field_state=None,
+        *,
+        update_memory: bool = True,
+        write_mask: torch.Tensor | None = None,
+    ):
+        """Refine neural and memory fields, returning explicit session state."""
+        tokens, write_mask, length = self._pad_block(tokens, write_mask)
+        if field_state is None:
+            field_state = self.new_field_state(tokens.shape[0])
+        embedding = self.embed(tokens)
+        cell_input = self.cell.control_input(embedding)
+        state = torch.zeros_like(embedding)
+        working_field = self.cell.attention.begin_block(field_state)
+        for _ in range(self.cfg.k):
+            state, working_field = self.cell.step_with_field(
+                state,
+                cell_input,
+                working_field,
+                write_mask=write_mask,
+            )
+        next_field = working_field if update_memory else field_state
+        return self.readout(state[:, :length]), next_field
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        logits, _ = self.forward_with_state(tokens)
+        return logits
+
+    def loss(self, tokens: torch.Tensor) -> torch.Tensor:
+        chunks = tokens.split(self.field_config.chunk_size, dim=1)
+        memory = self.new_field_state(tokens.shape[0])
         logits = []
         for chunk in chunks:
             chunk_logits, memory = self.forward_with_state(chunk, memory)

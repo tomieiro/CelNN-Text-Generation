@@ -5,9 +5,10 @@ This self-contained bundle trains the first small English CellLM chat model:
 - byte-level BPE vocabulary up to 1,024 tokens;
 - 256-dimensional embeddings and tied readout;
 - 16-token local causal Chua–Yang context;
-- dense slow channel mixer plus 32×32 Delta-Hebbian key--value memory;
-- learned Q/K/V projections and write/forget gates;
-- differentiable associative writes across causal blocks during training;
+- dense slow channel mixer plus one normalized 32×32 associative field per
+  lattice cell;
+- learned Q/K/V projections, write/forget gates, and causal field diffusion;
+- coupled `(x, M, s)` refinement with differentiable Delta-Hebbian writes;
 - assistant-only loss over conversations capped at 128 tokens;
 - BF16 training on CUDA;
 - rotating progress checkpoint every 250 steps;
@@ -63,12 +64,14 @@ useful as a chat model.
 
 By default, gradients pass through Delta-Hebbian writes so the representation
 can learn to store useful key--value associations. `--detach-memory` is retained
-only as an explicit credit-assignment ablation. The 32×32 fast state contains
-1,024 scalars per conversation rather than the previous 256×256 autoassociative
-matrix.
+only as an explicit credit-assignment ablation. With 16 lattice cells and
+32-dimensional keys and values, the normalized `M_i/s_i` field contains 16,896
+scalars per conversation (about 33 KiB in FP16), independent of conversation
+length. No `QK^T` matrix is formed.
 
 To resume a timed-out run, copy `progress.pt` and `tokenizer.json` into
 `experiment-chat/resume/` before resubmitting. The notebook stages them into
 the durable output mount and continues from the saved optimizer step. Only
-resume checkpoints produced by this Delta-Hebbian architecture; the Oja
+resume `celllm-chat-cy-hfa` checkpoints for the default `--attention field`
+run. Global Delta-Hebb checkpoints require `--attention global`; the Oja
 checkpoints from jobs 11832 and 11833 are intentionally rejected.

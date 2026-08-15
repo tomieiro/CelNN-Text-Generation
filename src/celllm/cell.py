@@ -9,8 +9,11 @@ from celnn import DifferentiableCellularNetwork
 from celnn import piecewise_linear as _piecewise_linear
 
 from celllm.config import ModelConfig, PlasticityConfig
-from celllm.attention import DeltaHebbianAttention
-from celllm.config import HebbianAttentionConfig
+from celllm.attention import (
+    ChuaYangHebbianFieldAttention,
+    DeltaHebbianAttention,
+)
+from celllm.config import CYHFAConfig, HebbianAttentionConfig
 from celllm.mixers import PlasticDenseMixer, build_mixer
 
 
@@ -114,3 +117,45 @@ class HebbianAttentionCelNNCell(CelNNCell):
         return self.attention.write(
             memory_state, piecewise_linear(activity), mask=mask
         )
+
+
+class CYHFACelNNCell(CelNNCell):
+    """Evolve Chua--Yang neural and associative field states together."""
+
+    def __init__(
+        self, cfg: ModelConfig, field: CYHFAConfig, causal: bool = True
+    ) -> None:
+        if not causal:
+            raise ValueError("CY-HFA language modeling requires causal dynamics")
+        super().__init__(cfg, causal=True)
+        if field.diffusion_radius > cfg.r:
+            raise ValueError(
+                "field diffusion radius cannot exceed the CelNN radius"
+            )
+        self.attention = ChuaYangHebbianFieldAttention(cfg.d, field)
+
+    def new_field_state(self, batch_size: int):
+        return self.attention.new_state(batch_size, self.cfg.n)
+
+    def step_with_field(
+        self,
+        x: torch.Tensor,
+        cell_input: torch.Tensor,
+        field_state,
+        *,
+        write_mask: torch.Tensor | None = None,
+    ):
+        """Advance ``(x, M, s)`` by one coupled causal refinement step."""
+        output = piecewise_linear(x)
+        memory_drive = self.attention.retrieve(output, field_state)
+        next_x = self.dynamics.step(
+            x,
+            cell_input,
+            extra_drive=self.mixer(x) + memory_drive,
+        )
+        next_field = self.attention.advance(
+            field_state,
+            piecewise_linear(next_x),
+            mask=write_mask,
+        )
+        return next_x, next_field

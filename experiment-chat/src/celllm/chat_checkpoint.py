@@ -9,6 +9,7 @@ import torch
 
 from celllm.chat_model import CellLMChatModel
 from celllm.config import (
+    CYHFAConfig,
     HebbianAttentionConfig,
     ModelConfig,
     PlasticityConfig,
@@ -27,18 +28,24 @@ def save_chat_checkpoint(
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
-    is_attention = model.memory_config is not None
-    configuration = (
-        {"memory_config": asdict(model.memory_config)}
-        if is_attention
-        else {"plasticity_config": asdict(model.plasticity_config)}
-    )
+    is_field = model.field_config is not None
+    is_global = model.memory_config is not None
+    if is_field:
+        configuration = {"field_config": asdict(model.field_config)}
+        format_version = 3
+        architecture = "celllm-chat-cy-hfa"
+    elif is_global:
+        configuration = {"memory_config": asdict(model.memory_config)}
+        format_version = 2
+        architecture = "celllm-chat-delta-hebb"
+    else:
+        configuration = {"plasticity_config": asdict(model.plasticity_config)}
+        format_version = 1
+        architecture = "celllm-chat"
     torch.save(
         {
-            "format_version": 2 if is_attention else 1,
-            "architecture": (
-                "celllm-chat-delta-hebb" if is_attention else "celllm-chat"
-            ),
+            "format_version": format_version,
+            "architecture": architecture,
             "step": step,
             "model_config": asdict(model.cfg),
             **configuration,
@@ -57,9 +64,18 @@ def load_chat_checkpoint(
     """Reconstruct a chat model with empty session memory."""
     checkpoint = torch.load(path, map_location=device, weights_only=True)
     architecture = checkpoint.get("architecture")
-    if architecture not in {"celllm-chat", "celllm-chat-delta-hebb"}:
+    if architecture not in {
+        "celllm-chat",
+        "celllm-chat-delta-hebb",
+        "celllm-chat-cy-hfa",
+    }:
         raise ValueError("checkpoint is not a CellLM chat model")
-    if architecture == "celllm-chat-delta-hebb":
+    if architecture == "celllm-chat-cy-hfa":
+        model = CellLMChatModel(
+            ModelConfig(**checkpoint["model_config"]),
+            field=CYHFAConfig(**checkpoint["field_config"]),
+        )
+    elif architecture == "celllm-chat-delta-hebb":
         model = CellLMChatModel(
             ModelConfig(**checkpoint["model_config"]),
             memory=HebbianAttentionConfig(**checkpoint["memory_config"]),
