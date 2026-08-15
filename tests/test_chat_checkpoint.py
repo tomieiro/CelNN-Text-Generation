@@ -7,6 +7,7 @@ from celllm.chat_model import CellLMChatModel
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
+    LocalAssociativeConfig,
     ModelConfig,
     PlasticityConfig,
     StateMatchedBankConfig,
@@ -90,3 +91,27 @@ def test_state_matched_bank_checkpoint_round_trip(tmp_path):
     state = restored.new_plastic_state(2)
     assert state.memory.shape == (2, 4, 3, 4)
     assert state.normalizer.shape == (2, 4, 4)
+
+
+def test_bank_local_checkpoint_round_trip(tmp_path):
+    model = CellLMChatModel(
+        ModelConfig(n=4, d=8, r=2, k=3, vocab_size=300),
+        bank=StateMatchedBankConfig(
+            slots=4, key_size=4, value_size=3, chunk_size=4
+        ),
+        local=LocalAssociativeConfig(
+            radius=2, key_size=4, value_size=3, gated=True
+        ),
+    ).eval()
+    tokens = torch.randint(0, 300, (1, 4))
+    expected = model(tokens)
+    path = tmp_path / "bank-local.pt"
+
+    save_chat_checkpoint(path, model, step=22)
+    restored, metadata = load_chat_checkpoint(path)
+
+    torch.testing.assert_close(restored(tokens), expected)
+    assert metadata["architecture"] == "celllm-chat-bank-local-associative"
+    assert metadata["format_version"] == 5
+    assert restored.local_config.radius == 2
+    assert restored.local_config.gated is True

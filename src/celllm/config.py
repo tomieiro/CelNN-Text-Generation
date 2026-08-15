@@ -149,6 +149,29 @@ class StateMatchedBankConfig:
 
 
 @dataclass(frozen=True)
+class LocalAssociativeConfig:
+    """Stateless causal associative messages inside one native block."""
+
+    radius: int = 2
+    key_size: int = 32
+    value_size: int = 32
+    gated: bool = True
+    retrieval_scale: float = 0.1
+    learnable_retrieval_scale: bool = True
+    epsilon: float = 1e-6
+
+    def __post_init__(self) -> None:
+        if self.radius < 1:
+            raise ValueError("local associative radius must be positive")
+        if self.key_size < 1 or self.value_size < 1:
+            raise ValueError("local key and value sizes must be positive")
+        if self.retrieval_scale < 0:
+            raise ValueError("local retrieval scale must be non-negative")
+        if self.epsilon <= 0:
+            raise ValueError("local epsilon must be positive")
+
+
+@dataclass(frozen=True)
 class CYHFAConfig:
     """Chua--Yang Hebbian Field Attention settings.
 

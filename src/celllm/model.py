@@ -23,6 +23,7 @@ from celllm.cell import (
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
+    LocalAssociativeConfig,
     ModelConfig,
     PlasticityConfig,
     StateMatchedBankConfig,
@@ -214,6 +215,7 @@ class StateMatchedBankCelNNLanguageModel(nn.Module):
         self,
         cfg: ModelConfig,
         bank: StateMatchedBankConfig | None = None,
+        local: LocalAssociativeConfig | None = None,
     ) -> None:
         super().__init__()
         self.cfg = replace(cfg, mixer="dense")
@@ -224,9 +226,10 @@ class StateMatchedBankCelNNLanguageModel(nn.Module):
         )
         if self.bank_config.slots != self.cfg.n:
             raise ValueError("state-matched bank slots must equal lattice size")
+        self.local_config = local
         self.embed = nn.Embedding(self.cfg.vocab_size, self.cfg.d)
         self.cell = StateMatchedBankCelNNCell(
-            self.cfg, self.bank_config, causal=True
+            self.cfg, self.bank_config, local=local, causal=True
         )
         self.readout = nn.Linear(
             self.cfg.d, self.cfg.vocab_size, bias=True
@@ -266,6 +269,7 @@ class StateMatchedBankCelNNLanguageModel(nn.Module):
                 cell_input,
                 memory_state,
                 retrieval_enabled=ablation.retrieval_enabled,
+                local_mask=write_mask,
                 trace=trace,
             )
         next_memory = (

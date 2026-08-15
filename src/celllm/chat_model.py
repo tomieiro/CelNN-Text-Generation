@@ -14,6 +14,7 @@ from celllm.ablation import (
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
+    LocalAssociativeConfig,
     ModelConfig,
     PlasticityConfig,
     StateMatchedBankConfig,
@@ -36,6 +37,7 @@ class CellLMChatModel(nn.Module):
         *,
         memory: HebbianAttentionConfig | None = None,
         bank: StateMatchedBankConfig | None = None,
+        local: LocalAssociativeConfig | None = None,
         field: CYHFAConfig | None = None,
     ) -> None:
         super().__init__()
@@ -46,25 +48,33 @@ class CellLMChatModel(nn.Module):
             raise ValueError(
                 "choose legacy plasticity, global memory, bank, or CY-HFA"
             )
+        if local is not None and bank is None:
+            raise ValueError("local associative messages require BANK")
         if plasticity is not None:
             self.core = PlasticCelNNLanguageModel(model, plasticity)
             self.memory_config = None
             self.bank_config = None
+            self.local_config = None
             self.field_config = None
         elif memory is not None:
             self.core = HebbianAttentionCelNNLanguageModel(model, memory)
             self.memory_config = self.core.memory_config
             self.bank_config = None
+            self.local_config = None
             self.field_config = None
         elif bank is not None:
-            self.core = StateMatchedBankCelNNLanguageModel(model, bank)
+            self.core = StateMatchedBankCelNNLanguageModel(
+                model, bank, local=local
+            )
             self.memory_config = None
             self.bank_config = self.core.bank_config
+            self.local_config = self.core.local_config
             self.field_config = None
         else:
             self.core = CYHFACelNNLanguageModel(model, field)
             self.memory_config = None
             self.bank_config = None
+            self.local_config = None
             self.field_config = self.core.field_config
 
     @property

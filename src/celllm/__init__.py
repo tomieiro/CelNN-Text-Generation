@@ -15,6 +15,7 @@ from celllm.attention import (
     ChuaYangHebbianFieldAttention,
     DeltaHebbianAttention,
     InterBlockFieldCarry,
+    LocalAssociativeMessagePassing,
     StateMatchedGlobalBankAttention,
 )
 from celllm.chat_stage8 import (
@@ -28,6 +29,7 @@ from celllm.chat_stage8 import (
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
+    LocalAssociativeConfig,
     ModelConfig,
     PlasticityConfig,
     StateMatchedBankConfig,
@@ -77,6 +79,8 @@ __all__ = [
     "HebbianAttentionConfig",
     "ChuaYangHebbianFieldAttention",
     "InterBlockFieldCarry",
+    "LocalAssociativeConfig",
+    "LocalAssociativeMessagePassing",
     "ModelConfig",
     "PlasticCelNNLanguageModel",
     "PlasticityConfig",

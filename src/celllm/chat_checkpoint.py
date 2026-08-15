@@ -11,6 +11,7 @@ from celllm.chat_model import CellLMChatModel
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
+    LocalAssociativeConfig,
     ModelConfig,
     PlasticityConfig,
     StateMatchedBankConfig,
@@ -38,8 +39,13 @@ def save_chat_checkpoint(
         architecture = "celllm-chat-cy-hfa"
     elif is_bank:
         configuration = {"bank_config": asdict(model.bank_config)}
-        format_version = 4
-        architecture = "celllm-chat-delta-hebb-bank"
+        if model.local_config is not None:
+            configuration["local_config"] = asdict(model.local_config)
+            format_version = 5
+            architecture = "celllm-chat-bank-local-associative"
+        else:
+            format_version = 4
+            architecture = "celllm-chat-delta-hebb-bank"
     elif is_global:
         configuration = {"memory_config": asdict(model.memory_config)}
         format_version = 2
@@ -74,10 +80,17 @@ def load_chat_checkpoint(
         "celllm-chat",
         "celllm-chat-delta-hebb",
         "celllm-chat-delta-hebb-bank",
+        "celllm-chat-bank-local-associative",
         "celllm-chat-cy-hfa",
     }:
         raise ValueError("checkpoint is not a CellLM chat model")
-    if architecture == "celllm-chat-delta-hebb-bank":
+    if architecture == "celllm-chat-bank-local-associative":
+        model = CellLMChatModel(
+            ModelConfig(**checkpoint["model_config"]),
+            bank=StateMatchedBankConfig(**checkpoint["bank_config"]),
+            local=LocalAssociativeConfig(**checkpoint["local_config"]),
+        )
+    elif architecture == "celllm-chat-delta-hebb-bank":
         model = CellLMChatModel(
             ModelConfig(**checkpoint["model_config"]),
             bank=StateMatchedBankConfig(**checkpoint["bank_config"]),

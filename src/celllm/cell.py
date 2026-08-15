@@ -13,11 +13,13 @@ from celllm.config import ModelConfig, PlasticityConfig
 from celllm.attention import (
     ChuaYangHebbianFieldAttention,
     DeltaHebbianAttention,
+    LocalAssociativeMessagePassing,
     StateMatchedGlobalBankAttention,
 )
 from celllm.config import (
     CYHFAConfig,
     HebbianAttentionConfig,
+    LocalAssociativeConfig,
     StateMatchedBankConfig,
 )
 from celllm.mixers import PlasticDenseMixer, build_mixer
@@ -143,10 +145,20 @@ class StateMatchedBankCelNNCell(CelNNCell):
         self,
         cfg: ModelConfig,
         bank: StateMatchedBankConfig,
+        local: LocalAssociativeConfig | None = None,
         causal: bool = True,
     ) -> None:
         super().__init__(cfg, causal=causal)
         self.attention = StateMatchedGlobalBankAttention(cfg.d, bank)
+        if local is not None and local.radius > cfg.r:
+            raise ValueError(
+                "local associative radius cannot exceed CelNN radius"
+            )
+        self.local_attention = (
+            None
+            if local is None
+            else LocalAssociativeMessagePassing(cfg.d, local)
+        )
 
     def new_memory_state(self, batch_size: int):
         return self.attention.new_state(batch_size)
@@ -158,6 +170,7 @@ class StateMatchedBankCelNNCell(CelNNCell):
         memory_state,
         *,
         retrieval_enabled: bool = True,
+        local_mask: torch.Tensor | None = None,
         trace: AblationTrace | None = None,
     ) -> torch.Tensor:
         next_state, _ = self.refine_with_memory(
@@ -165,6 +178,7 @@ class StateMatchedBankCelNNCell(CelNNCell):
             cell_input,
             memory_state,
             retrieval_enabled=retrieval_enabled,
+            local_mask=local_mask,
             trace=trace,
         )
         return next_state
@@ -176,6 +190,7 @@ class StateMatchedBankCelNNCell(CelNNCell):
         memory_state,
         *,
         retrieval_enabled: bool = True,
+        local_mask: torch.Tensor | None = None,
         trace: AblationTrace | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Advance once and expose the retrieval drive for diagnostics."""
@@ -186,10 +201,21 @@ class StateMatchedBankCelNNCell(CelNNCell):
             enabled=retrieval_enabled,
             trace=trace,
         )
+        local_drive = (
+            torch.zeros_like(memory_drive)
+            if self.local_attention is None
+            else self.local_attention(
+                output,
+                memory_drive,
+                mask=local_mask,
+            )
+        )
+        if trace is not None and self.local_attention is not None:
+            trace.record("local_retrieval_drive", local_drive)
         next_state = self.dynamics.step(
             x,
             cell_input,
-            extra_drive=self.mixer(x) + memory_drive,
+            extra_drive=self.mixer(x) + memory_drive + local_drive,
         )
         return next_state, memory_drive
 
