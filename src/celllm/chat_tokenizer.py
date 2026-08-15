@@ -89,6 +89,13 @@ class ChatTokenizer:
     def encode(self, text: str) -> list[int]:
         return self._tokenizer.encode(text, add_special_tokens=False).ids
 
+    def encode_with_offsets(
+        self, text: str
+    ) -> tuple[list[int], list[tuple[int, int]]]:
+        """Encode text and expose normalized character spans for diagnostics."""
+        encoding = self._tokenizer.encode(text, add_special_tokens=False)
+        return encoding.ids, encoding.offsets
+
     def decode(self, ids: Iterable[int], *, skip_special: bool = True) -> str:
         return self._tokenizer.decode(
             list(ids), skip_special_tokens=skip_special
